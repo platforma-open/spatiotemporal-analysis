@@ -136,6 +136,32 @@ export const model = BlockModel.create()
     return undefined;
   })
 
+  // Unique values of the temporal column (extracted from anchored p-column data)
+  .output('temporalColumnValues', (ctx) => {
+    const { temporalColumnRef, abundanceRef } = ctx.args;
+    if (!temporalColumnRef || !abundanceRef) return undefined;
+
+    const cols = ctx.resultPool.getAnchoredPColumns(
+      { main: abundanceRef },
+      [JSON.parse(temporalColumnRef) as never],
+    );
+    if (!cols || cols.length === 0) return undefined;
+
+    // Try to get discrete values from the column spec annotations
+    const col = cols[0];
+    const discreteVals = col.spec.annotations?.['pl7.app/discreteValues'];
+    if (discreteVals) {
+      try {
+        return JSON.parse(discreteVals) as string[];
+      } catch {
+        return undefined;
+      }
+    }
+
+    // No discrete values available in spec
+    return undefined;
+  })
+
   // Main output table
   .outputWithStatus('mainTable', (ctx) => {
     const pCols = ctx.outputs?.resolve('mainPf')?.getPColumns();

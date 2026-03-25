@@ -16,7 +16,7 @@ import {
   PlTooltip,
   usePlDataTableSettingsV2,
 } from '@platforma-sdk/ui-vue';
-import { ref } from 'vue';
+import { computed, ref, watchEffect } from 'vue';
 import { useApp } from '../app';
 
 const app = useApp();
@@ -42,6 +42,40 @@ const normalizationOptions = [
 
 const tableSettings = usePlDataTableSettingsV2({
   model: () => app.model.outputs.mainTable,
+});
+
+// Unique timepoint values from the model (extracted from p-column spec)
+const timepointValues = computed(() => app.model.outputs.temporalColumnValues ?? []);
+
+const availableTimepointsToAdd = computed(() => {
+  const current = new Set(app.model.args.timepointOrder);
+  return timepointValues.value.filter((v: string) => !current.has(v));
+});
+
+const resetTimepointOrder = () => {
+  if (timepointValues.value.length) {
+    app.model.args.timepointOrder = [...timepointValues.value];
+  }
+};
+
+// Auto-populate timepoint order when temporal column changes
+const temporalSyncCol = ref<string | undefined>(app.model.args.temporalColumnRef);
+watchEffect(() => {
+  const col = app.model.args.temporalColumnRef;
+  const vals = timepointValues.value;
+
+  if (vals && vals.length > 0) {
+    const current = app.model.args.timepointOrder;
+    const valSet = new Set(vals);
+    const hasInvalidItems = current.some((v: string) => !valSet.has(v));
+
+    if (col !== temporalSyncCol.value || current.length === 0) {
+      app.model.args.timepointOrder = [...vals];
+      temporalSyncCol.value = col;
+    } else if (hasInvalidItems) {
+      app.model.args.timepointOrder = current.filter((v: string) => valSet.has(v));
+    }
+  }
 });
 
 const isTimepointOrderOpen = ref(true);
@@ -133,6 +167,15 @@ const isAdvancedOpen = ref(false);
             {{ item }}
           </template>
         </PlElementList>
+        <PlBtnGhost
+          v-if="availableTimepointsToAdd.length > 0"
+          @click="resetTimepointOrder"
+        >
+          Reset to default
+          <template #append>
+            <PlMaskIcon24 name="reverse" />
+          </template>
+        </PlBtnGhost>
       </PlAccordionSection>
 
       <PlAccordionSection v-model="isAdvancedOpen" label="Advanced settings">
