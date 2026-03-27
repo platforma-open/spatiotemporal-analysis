@@ -1,19 +1,33 @@
 <script setup lang="ts">
-import { PlBlockPage } from '@platforma-sdk/ui-vue';
+import type { PredefinedGraphOption } from '@milaboratories/graph-maker';
 import { GraphMaker } from '@milaboratories/graph-maker';
+import '@milaboratories/graph-maker/styles';
+import { computed } from 'vue';
 import { useApp } from '../app';
 
 const app = useApp();
+
+const defaultOptions = computed((): PredefinedGraphOption<'heatmap'>[] | null => {
+  const pCols = app.model.outputs.heatmapPCols;
+  if (!pCols || pCols.length === 0) return null;
+
+  const freqCol = pCols.find((p) => p.spec.name === 'pl7.app/vdj/normalizedFrequency');
+  if (!freqCol) return null;
+
+  // axes: [elementId, compartmentCategory], value: normalizedFrequency
+  return [
+    { inputName: 'x', selectedSource: freqCol.spec.axesSpec[1] },
+    { inputName: 'y', selectedSource: freqCol.spec.axesSpec[0] },
+    { inputName: 'value', selectedSource: freqCol.spec },
+  ];
+});
 </script>
 
 <template>
-  <PlBlockPage>
-    <template #title>Compartment Heatmap</template>
-    <GraphMaker
-      v-model="app.model.ui.heatmapState"
-      chartType="heatmap"
-      :data-state-key="app.model.outputs.heatmapPf"
-      :p-frame="app.model.outputs.heatmapPf"
-    />
-  </PlBlockPage>
+  <GraphMaker
+    v-model="app.model.ui.heatmapState"
+    chartType="heatmap"
+    :p-frame="app.model.outputs.heatmapPf"
+    :defaultOptions="defaultOptions"
+  />
 </template>

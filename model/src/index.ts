@@ -168,25 +168,34 @@ export const model = BlockModel.create()
     return createPlDataTableV2(ctx, pCols, ctx.uiState.tableState);
   })
 
-  // Heatmap PFrame
+  // Heatmap PFrame + raw columns for graph defaults
   .outputWithStatus('heatmapPf', (ctx): PFrameHandle | undefined => {
     const pCols = ctx.outputs?.resolve('heatmapPf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
+  .output('heatmapPCols', (ctx) => {
+    return ctx.outputs?.resolve('heatmapPf')?.getPColumns();
+  })
 
-  // Temporal line PFrame
+  // Temporal line PFrame + raw columns for graph defaults
   .outputWithStatus('temporalLinePf', (ctx): PFrameHandle | undefined => {
     const pCols = ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
+  .output('temporalLinePCols', (ctx) => {
+    return ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
+  })
 
-  // Prevalence histogram PFrame
+  // Prevalence histogram PFrame + raw columns for graph defaults
   .outputWithStatus('prevalenceHistogramPf', (ctx): PFrameHandle | undefined => {
     const pCols = ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
+  })
+  .output('prevalenceHistogramPCols', (ctx) => {
+    return ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
   })
 
   .output('isRunning', (ctx) => ctx.outputs?.getIsReadyOrError() === false)
