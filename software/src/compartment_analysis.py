@@ -482,20 +482,54 @@ def compute_subject_prevalence(df: pl.DataFrame, has_subject: bool) -> pl.DataFr
 def build_heatmap_data(
     df: pl.DataFrame,
     grouping_metrics: pl.DataFrame | None,
+    prevalence: pl.DataFrame | None,
     top_n: int = 50,
 ) -> pl.DataFrame:
-    """Build heatmap data for top N clones by RI (most restricted)."""
+    """Build heatmap for top N convergent multi-compartment clones.
+
+    Selection: breadth >= 2 (present in multiple groups), then ranked by
+    subject prevalence (descending) and total abundance (descending).
+    These are the clones most relevant for downstream lead selection.
+    """
     df = df.filter(pl.col(COL_GROUPING).is_not_null() & (pl.col(COL_GROUPING) != ""))
     heatmap = (
         df.group_by(["elementId", COL_GROUPING])
         .agg(pl.col("frequency").mean().alias("normalizedFrequency"))
     )
 
-    # Filter to top N clones by Restriction Index
-    if grouping_metrics is not None and "ri" in grouping_metrics.columns and len(grouping_metrics) > 0:
+    if grouping_metrics is not None and "breadth" in grouping_metrics.columns and len(grouping_metrics) > 0:
+        # Start with multi-compartment clones (breadth >= 2)
+        candidates = grouping_metrics.filter(pl.col("breadth") >= 2)
+
+        # If too few, fall back to all clones
+        if len(candidates) < top_n:
+            candidates = grouping_metrics
+
+        # Join prevalence for ranking
+        if prevalence is not None and "subjectPrevalence" in prevalence.columns:
+            candidates = candidates.join(prevalence.select(["elementId", "subjectPrevalence"]),
+                                         on="elementId", how="left")
+            candidates = candidates.with_columns(
+                pl.col("subjectPrevalence").fill_null(0)
+            )
+        else:
+            candidates = candidates.with_columns(pl.lit(0).alias("subjectPrevalence"))
+
+        # Join total abundance for secondary ranking
+        total_abundance = (
+            df.group_by("elementId")
+            .agg(pl.col("frequency").sum().alias("totalAbundance"))
+        )
+        candidates = candidates.join(total_abundance, on="elementId", how="left")
+        candidates = candidates.with_columns(
+            pl.col("totalAbundance").fill_null(0.0)
+        )
+
         top_elements = (
-            grouping_metrics.filter(pl.col("ri").is_not_null())
-            .sort("ri", descending=True)
+            candidates.sort(
+                ["subjectPrevalence", "totalAbundance"],
+                descending=[True, True],
+            )
             .head(top_n)["elementId"]
             .to_list()
         )
@@ -605,8 +639,12 @@ def main():
         if len(grouping) > 0:
             grouping.write_csv(f"{prefix}_grouping.csv")
 
-        heatmap = build_heatmap_data(df, grouping if grouping is not None and len(grouping) > 0 else None,
-                                     top_n=args.top_n)
+        heatmap = build_heatmap_data(
+            df,
+            grouping if grouping is not None and len(grouping) > 0 else None,
+            prevalence if len(prevalence) > 0 else None,
+            top_n=args.top_n,
+        )
         if len(heatmap) > 0:
             heatmap.write_csv(f"{prefix}_heatmap.csv")
 
