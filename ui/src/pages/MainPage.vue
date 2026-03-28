@@ -45,6 +45,29 @@ const tableSettings = usePlDataTableSettingsV2({
   model: () => app.model.outputs.mainTable,
 });
 
+// Auto-build default subtitle from selected settings
+watchEffect(() => {
+  const metaOpts = app.model.outputs.metadataOptions ?? [];
+  const findLabel = (ref?: string) => {
+    if (!ref) return undefined;
+    const opt = metaOpts.find((o: { value?: string; label?: string }) => o.value === ref);
+    return opt?.label;
+  };
+
+  const parts: string[] = [];
+
+  const mode = app.model.args.calculationMode;
+  parts.push(mode === 'intra-subject' ? 'Intra-Subject' : 'Population');
+
+  const groupLabel = findLabel(app.model.args.groupingColumnRef);
+  if (groupLabel) parts.push(groupLabel);
+
+  const temporalLabel = findLabel(app.model.args.temporalColumnRef);
+  if (temporalLabel) parts.push(temporalLabel);
+
+  app.model.args.defaultBlockLabel = parts.join(', ');
+});
+
 // Subject is required only in intra-subject mode
 const subjectRequired = computed(() => app.model.args.calculationMode === 'intra-subject');
 
@@ -131,6 +154,7 @@ const isAdvancedOpen = ref(false);
       :settings="tableSettings"
       not-ready-text="Data is not computed"
       show-export-button
+      show-search-field
     />
   </PlBlockPage>
 

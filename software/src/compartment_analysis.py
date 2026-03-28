@@ -479,13 +479,28 @@ def compute_subject_prevalence(df: pl.DataFrame, has_subject: bool) -> pl.DataFr
     return prevalence
 
 
-def build_heatmap_data(df: pl.DataFrame, mode: str) -> pl.DataFrame:
-    """Build heatmap data: element x group -> normalized frequency."""
+def build_heatmap_data(
+    df: pl.DataFrame,
+    grouping_metrics: pl.DataFrame | None,
+    top_n: int = 50,
+) -> pl.DataFrame:
+    """Build heatmap data for top N clones by RI (most restricted)."""
     df = df.filter(pl.col(COL_GROUPING).is_not_null() & (pl.col(COL_GROUPING) != ""))
     heatmap = (
         df.group_by(["elementId", COL_GROUPING])
         .agg(pl.col("frequency").mean().alias("normalizedFrequency"))
     )
+
+    # Filter to top N clones by Restriction Index
+    if grouping_metrics is not None and "ri" in grouping_metrics.columns and len(grouping_metrics) > 0:
+        top_elements = (
+            grouping_metrics.filter(pl.col("ri").is_not_null())
+            .sort("ri", descending=True)
+            .head(top_n)["elementId"]
+            .to_list()
+        )
+        heatmap = heatmap.filter(pl.col("elementId").is_in(top_elements))
+
     return heatmap.rename({COL_GROUPING: "groupCategory"})
 
 
@@ -583,13 +598,15 @@ def main():
     histogram.write_csv(f"{prefix}_prevalence_histogram.csv")
 
     # Grouping metrics
+    grouping = None
     if args.has_grouping:
         grouping = compute_grouping_metrics(df, has_subject, mode,
                                             args.presence_threshold, args.min_subject_count)
         if len(grouping) > 0:
             grouping.write_csv(f"{prefix}_grouping.csv")
 
-        heatmap = build_heatmap_data(df, mode)
+        heatmap = build_heatmap_data(df, grouping if grouping is not None and len(grouping) > 0 else None,
+                                     top_n=args.top_n)
         if len(heatmap) > 0:
             heatmap.write_csv(f"{prefix}_heatmap.csv")
 
