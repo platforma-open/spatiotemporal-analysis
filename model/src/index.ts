@@ -85,16 +85,10 @@ export const model = BlockModel.create()
     },
     prevalenceHistogramState: {
       title: 'Subject prevalence distribution',
-      template: 'bins',
+      template: 'bar',
       currentTab: null,
       layersSettings: {
-        bins: { fillColor: '#99e099' },
-      },
-      axesSettings: {
-        axisY: {
-          axisLabelsAngle: 90,
-          scale: 'log',
-        },
+        bar: { fillColor: '#5b9bd5' },
       },
     },
   })

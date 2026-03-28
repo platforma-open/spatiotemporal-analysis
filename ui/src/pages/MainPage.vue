@@ -131,6 +131,7 @@ const isAdvancedOpen = ref(false);
       :settings="tableSettings"
       not-ready-text="Data is not computed"
       show-export-button
+      show-search-field
     />
   </PlBlockPage>
 

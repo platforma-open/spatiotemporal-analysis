@@ -7,17 +7,17 @@ import { useApp } from '../app';
 
 const app = useApp();
 
-const defaultOptions = computed((): PredefinedGraphOption<'histogram'>[] | null => {
+const defaultOptions = computed((): PredefinedGraphOption<'discrete'>[] | null => {
   const pCols = app.model.outputs.prevalenceHistogramPCols;
   if (!pCols || pCols.length === 0) return null;
 
   const countCol = pCols.find((p) => p.spec.name === 'pl7.app/vdj/cloneCount');
   if (!countCol) return null;
 
-  // axes: [prevalenceCount], value: cloneCount
+  // primaryGrouping = prevalenceCount (discrete axis), Y = cloneCount (value)
   return [
-    { inputName: 'value', selectedSource: countCol.spec },
-    { inputName: 'grouping', selectedSource: countCol.spec.axesSpec[0] },
+    { inputName: 'primaryGrouping', selectedSource: countCol.spec.axesSpec[0] },
+    { inputName: 'y', selectedSource: countCol.spec },
   ];
 });
 </script>
@@ -25,7 +25,7 @@ const defaultOptions = computed((): PredefinedGraphOption<'histogram'>[] | null 
 <template>
   <GraphMaker
     v-model="app.model.ui.prevalenceHistogramState"
-    chartType="histogram"
+    chartType="discrete"
     :p-frame="app.model.outputs.prevalenceHistogramPf"
     :defaultOptions="defaultOptions"
   />
