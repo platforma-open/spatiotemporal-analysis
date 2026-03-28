@@ -52,9 +52,11 @@ def read_input(path: str, has_grouping: bool, has_timepoint: bool,
     df = df.with_columns(pl.col("abundance").cast(pl.Float64))
     df = df.filter(pl.col("abundance").is_not_null())
 
-    # Apply minimum abundance filter
+    # Apply minimum abundance filter: exclude clones whose peak abundance across
+    # all samples is below the threshold (R7c). A clone is kept if it exceeds
+    # the threshold in at least one sample.
     if min_abundance_threshold > 0:
-        df = df.filter(pl.col("abundance") >= min_abundance_threshold)
+        df = df.filter(pl.col("abundance").max().over("elementId") >= min_abundance_threshold)
 
     # Force categorical columns to String
     if has_grouping and COL_GROUPING in df.columns:
@@ -83,11 +85,18 @@ def average_replicates(df: pl.DataFrame, has_subject: bool, has_grouping: bool,
     if combo_counts["nSamples"].max() <= 1:
         return df  # No replicates, nothing to average
 
-    # Average abundance across replicate samples for each condition combo
-    averaged = df.group_by(group_cols).agg(
-        pl.col("abundance").mean().alias("abundance"),
-        pl.col("sampleId").first().alias("sampleId"),
-    )
+    # Average abundance across replicate samples for each condition combo.
+    # Build a deterministic synthetic sampleId from condition columns only
+    # (excluding elementId) so all clones in the same condition share one
+    # sampleId — required for correct per-sample normalization (R7a/R8).
+    averaged = df.group_by(group_cols).agg(pl.col("abundance").mean().alias("abundance"))
+    condition_cols = [c for c in group_cols if c != "elementId"]
+    if condition_cols:
+        averaged = averaged.with_columns(
+            pl.concat_str([pl.col(c).cast(pl.String) for c in condition_cols], separator="|").alias("sampleId")
+        )
+    else:
+        averaged = averaged.with_columns(pl.lit("__all__").alias("sampleId"))
     return averaged
 
 
@@ -134,6 +143,8 @@ def compute_clr(df: pl.DataFrame, mode: str, has_subject: bool) -> pl.DataFrame:
 
 def _apply_clr_to_group(df: pl.DataFrame) -> pl.DataFrame:
     """Apply CLR transform to a group of samples."""
+    if df.is_empty():
+        return df
     min_nonzero = df.filter(pl.col("frequency") > 0)["frequency"].min()
     if min_nonzero is None or min_nonzero <= 0:
         min_nonzero = 1e-10
@@ -164,7 +175,9 @@ def restriction_index(freq_by_group: np.ndarray) -> float:
     """RI = 1 - H(p) / log2(N)"""
     nonzero = freq_by_group[freq_by_group > 0]
     n = len(nonzero)
-    if n <= 1:
+    if n == 0:
+        return float("nan")
+    if n == 1:
         return 1.0
     h = shannon_entropy(nonzero)
     return 1.0 - h / math.log2(n)
@@ -227,7 +240,7 @@ def compute_grouping_metrics(
             "dominant": consensus_dominant,
             "breadth": mean_breadth,
         }
-        if mode == "population" and has_subject:
+        if has_subject:
             row["consensusDominant"] = consensus_dominant
             row["meanRi"] = mean_ri
             row["stdRi"] = std_ri
