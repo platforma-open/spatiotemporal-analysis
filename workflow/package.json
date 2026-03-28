@@ -1,6 +1,6 @@
 {
   "name": "@platforma-open/milaboratories.spatiotemporal-analysis.workflow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tengo-based template",
   "scripts": {
     "build": "shx rm -rf dist && pl-tengo check && pl-tengo build",
