@@ -240,7 +240,7 @@ def compute_grouping_metrics(
             "dominant": consensus_dominant,
             "breadth": mean_breadth,
         }
-        if mode == "population" and has_subject:
+        if has_subject:
             row["consensusDominant"] = consensus_dominant
             row["meanRi"] = mean_ri
             row["stdRi"] = std_ri
