@@ -1,5 +1,11 @@
 # @platforma-open/milaboratories.spatiotemporal-analysis
 
+## 1.0.1
+
+### Patch Changes
+
+- 3222205: Release
+
 ## 1.0.0
 
 ### Major Changes
