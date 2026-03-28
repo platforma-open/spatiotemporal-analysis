@@ -52,9 +52,13 @@ def read_input(path: str, has_grouping: bool, has_timepoint: bool,
     df = df.with_columns(pl.col("abundance").cast(pl.Float64))
     df = df.filter(pl.col("abundance").is_not_null())
 
-    # Apply minimum abundance filter
+    # Apply minimum abundance filter: exclude clones whose peak abundance across
+    # all samples is below the threshold (R7c). A clone is kept if it exceeds
+    # the threshold in at least one sample.
     if min_abundance_threshold > 0:
-        df = df.filter(pl.col("abundance") >= min_abundance_threshold)
+        max_per_clone = df.group_by("elementId").agg(pl.col("abundance").max().alias("_maxAbundance"))
+        df = df.join(max_per_clone, on="elementId")
+        df = df.filter(pl.col("_maxAbundance") >= min_abundance_threshold).drop("_maxAbundance")
 
     # Force categorical columns to String
     if has_grouping and COL_GROUPING in df.columns:
