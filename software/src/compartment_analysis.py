@@ -56,9 +56,7 @@ def read_input(path: str, has_grouping: bool, has_timepoint: bool,
     # all samples is below the threshold (R7c). A clone is kept if it exceeds
     # the threshold in at least one sample.
     if min_abundance_threshold > 0:
-        max_per_clone = df.group_by("elementId").agg(pl.col("abundance").max().alias("_maxAbundance"))
-        df = df.join(max_per_clone, on="elementId")
-        df = df.filter(pl.col("_maxAbundance") >= min_abundance_threshold).drop("_maxAbundance")
+        df = df.filter(pl.col("abundance").max().over("elementId") >= min_abundance_threshold)
 
     # Force categorical columns to String
     if has_grouping and COL_GROUPING in df.columns:
