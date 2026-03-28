@@ -87,11 +87,18 @@ def average_replicates(df: pl.DataFrame, has_subject: bool, has_grouping: bool,
     if combo_counts["nSamples"].max() <= 1:
         return df  # No replicates, nothing to average
 
-    # Average abundance across replicate samples for each condition combo
-    averaged = df.group_by(group_cols).agg(
-        pl.col("abundance").mean().alias("abundance"),
-        pl.col("sampleId").first().alias("sampleId"),
-    )
+    # Average abundance across replicate samples for each condition combo.
+    # Build a deterministic synthetic sampleId from condition columns only
+    # (excluding elementId) so all clones in the same condition share one
+    # sampleId — required for correct per-sample normalization (R7a/R8).
+    averaged = df.group_by(group_cols).agg(pl.col("abundance").mean().alias("abundance"))
+    condition_cols = [c for c in group_cols if c != "elementId"]
+    if condition_cols:
+        averaged = averaged.with_columns(
+            pl.concat_str([pl.col(c).cast(pl.String) for c in condition_cols], separator="|").alias("sampleId")
+        )
+    else:
+        averaged = averaged.with_columns(pl.lit("__all__").alias("sampleId"))
     return averaged
 
 
