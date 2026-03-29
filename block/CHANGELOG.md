@@ -1,5 +1,11 @@
 # @platforma-open/milaboratories.spatiotemporal-analysis
 
+## 1.1.0
+
+### Minor Changes
+
+- 5c9a004: Rename block to Clonotype Distribution; hide Subject Prevalence when no subject variable; add tooltips to Grouping/Temporal dropdowns; default Min Subject Count to 1
+
 ## 1.0.3
 
 ### Patch Changes
