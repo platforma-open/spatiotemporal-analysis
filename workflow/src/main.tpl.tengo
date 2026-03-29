@@ -70,7 +70,6 @@ wf.body(func(args) {
 		arg("--normalization").arg(normalization).
 		arg("--timepoint-order").arg(string(json.encode(args.timepointOrder))).
 		arg("--presence-threshold").arg(string(args.presenceThreshold)).
-		arg("--pseudo-count").arg(string(args.pseudoCount)).
 		arg("--min-abundance-threshold").arg(string(args.minAbundanceThreshold)).
 		arg("--min-subject-count").arg(string(args.minSubjectCount)).
 		arg("--top-n").arg(string(args.topN)).

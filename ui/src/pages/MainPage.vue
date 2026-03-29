@@ -295,17 +295,6 @@ const isAdvancedOpen = ref(false);
           </template>
         </PlNumberField>
 
-        <PlNumberField
-          v-model="app.model.args.pseudoCount"
-          label="Pseudo-count"
-          :min-value="0"
-          :step="1"
-        >
-          <template #tooltip>
-            Added to frequencies before log2 fold-change computation to prevent log(0).
-            Default: 1.
-          </template>
-        </PlNumberField>
       </PlAccordionSection>
     </PlAccordion>
   </PlSlideModal>

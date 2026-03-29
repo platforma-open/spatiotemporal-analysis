@@ -34,7 +34,6 @@ export type BlockArgs = {
 
   // Thresholds & filters
   presenceThreshold: number;
-  pseudoCount: number;
   minAbundanceThreshold: number;
   minSubjectCount: number;
   topN: number;
@@ -55,7 +54,6 @@ export function getDefaultBlockArgs(): BlockArgs {
     timepointOrder: [],
     normalization: 'relative-frequency',
     presenceThreshold: 0,
-    pseudoCount: 1,
     minAbundanceThreshold: 0,
     minSubjectCount: 2,
     topN: 20,

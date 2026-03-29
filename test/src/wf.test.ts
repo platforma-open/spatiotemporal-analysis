@@ -208,7 +208,6 @@ blockTest(
       subjectColumnRef: donorOption.value,
       normalization: 'relative-frequency',
       presenceThreshold: 0,
-      pseudoCount: 1,
       minAbundanceThreshold: 0,
       minSubjectCount: 2,
       topN: 20,

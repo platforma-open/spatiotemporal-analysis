@@ -27,7 +27,6 @@ def parse_args():
     parser.add_argument("--has-subject", action="store_true")
     parser.add_argument("--timepoint-order", type=str, default="[]")
     parser.add_argument("--presence-threshold", type=float, default=0.0)
-    parser.add_argument("--pseudo-count", type=float, default=1.0)
     parser.add_argument("--min-abundance-threshold", type=float, default=0.0)
     parser.add_argument("--min-subject-count", type=int, default=2)
     parser.add_argument("--top-n", type=int, default=20)
@@ -111,6 +110,7 @@ def compute_relative_frequency(df: pl.DataFrame) -> pl.DataFrame:
         (pl.col("abundance") / pl.col("sampleTotal")).alias("frequency")
     ).drop("sampleTotal")
     return df
+
 
 
 def compute_clr(df: pl.DataFrame, mode: str, has_subject: bool) -> pl.DataFrame:
@@ -340,10 +340,12 @@ def compute_temporal_metrics(
     timepoint_order: list[str],
     has_subject: bool,
     mode: str,
-    pseudo_count: float,
     min_subject_count: int,
 ) -> pl.DataFrame:
-    """Compute peak timepoint, TSI, log2 kinetic delta, log2 peak delta."""
+    """Compute peak timepoint, TSI, log2 kinetic delta, log2 peak delta.
+
+    Fold-changes use standard frequencies at detected timepoints (always nonzero).
+    """
     if len(timepoint_order) < 2:
         return pl.DataFrame()
 
@@ -354,21 +356,16 @@ def compute_temporal_metrics(
     t_count = len(timepoint_order)
 
     if not has_subject or mode == "population":
-        # Aggregate frequency and raw counts per element per timepoint
         per_tp = (
             df.group_by(["elementId", COL_TIMEPOINT])
-            .agg([
-                pl.col("frequency").mean().alias("meanFreq"),
-                pl.col("abundance").mean().alias("meanCount"),
-            ])
+            .agg(pl.col("frequency").mean().alias("meanFreq"))
         )
 
         results = []
         for element_id, group in per_tp.group_by("elementId"):
             eid = element_id[0] if isinstance(element_id, tuple) else element_id
             tp_freq = dict(zip(group[COL_TIMEPOINT].to_list(), group["meanFreq"].to_list()))
-            tp_counts = dict(zip(group[COL_TIMEPOINT].to_list(), group["meanCount"].to_list()))
-            row = _compute_temporal_for_element(eid, tp_freq, tp_counts, timepoint_order, t_count, pseudo_count)
+            row = _compute_temporal_for_element(eid, tp_freq, timepoint_order, t_count)
             results.append(row)
 
         if not results:
@@ -379,18 +376,14 @@ def compute_temporal_metrics(
         # Intra-subject: per-subject metrics then average
         per_tp = (
             df.group_by(["elementId", COL_SUBJECT, COL_TIMEPOINT])
-            .agg([
-                pl.col("frequency").mean().alias("meanFreq"),
-                pl.col("abundance").mean().alias("meanCount"),
-            ])
+            .agg(pl.col("frequency").mean().alias("meanFreq"))
         )
 
         per_subject_temporal = []
         for (element_id, subject), group in per_tp.group_by(["elementId", COL_SUBJECT]):
             eid = element_id if not isinstance(element_id, tuple) else element_id
             tp_freq = dict(zip(group[COL_TIMEPOINT].to_list(), group["meanFreq"].to_list()))
-            tp_counts = dict(zip(group[COL_TIMEPOINT].to_list(), group["meanCount"].to_list()))
-            row = _compute_temporal_for_element(eid, tp_freq, tp_counts, timepoint_order, t_count, pseudo_count)
+            row = _compute_temporal_for_element(eid, tp_freq, timepoint_order, t_count)
             row[COL_SUBJECT] = subject
             per_subject_temporal.append(row)
 
@@ -420,19 +413,16 @@ def compute_temporal_metrics(
 def _compute_temporal_for_element(
     element_id: str,
     tp_freq: dict[str, float],
-    tp_counts: dict[str, float],
     timepoint_order: list[str],
     t_count: int,
-    pseudo_count: float,
 ) -> dict:
     """Compute temporal metrics for a single element.
 
-    Frequencies are used for TSI and peak detection. Raw abundance counts
-    are used for Log2 Peak Delta and Log2 Kinetic Delta (pseudo-count
-    is added to raw counts, not frequencies).
+    All metrics use standard frequencies. Fold-changes (Log2 Peak Delta,
+    Log2 Kinetic Delta) are computed between detected timepoints where
+    frequency is always nonzero by definition.
     """
     freqs = np.array([tp_freq.get(tp, 0.0) for tp in timepoint_order])
-    counts = np.array([tp_counts.get(tp, 0.0) for tp in timepoint_order])
 
     # Peak timepoint (by frequency)
     peak_idx = int(np.argmax(freqs))
@@ -446,25 +436,22 @@ def _compute_temporal_for_element(
     else:
         tsi = float("nan")
 
-    # Log2 Kinetic Delta: last-to-first using RAW COUNTS + pseudo
+    # Log2 Kinetic Delta: last-detected to first-detected
     nonzero_indices = np.where(freqs > 0)[0]
     if len(nonzero_indices) >= 2:
-        first_count = float(counts[nonzero_indices[0]])
-        last_count = float(counts[nonzero_indices[-1]])
-        log2kd = math.log2((last_count + pseudo_count) / (first_count + pseudo_count))
+        first_freq = float(freqs[nonzero_indices[0]])
+        last_freq = float(freqs[nonzero_indices[-1]])
+        log2kd = math.log2(last_freq / first_freq)
     elif len(nonzero_indices) == 1:
         log2kd = 0.0
     else:
         log2kd = 0.0
 
-    # Log2 Peak Delta: peak-to-first using RAW COUNTS + pseudo
+    # Log2 Peak Delta: peak to first-detected
     if len(nonzero_indices) >= 1:
-        first_count = float(counts[nonzero_indices[0]])
-        peak_count = float(counts[peak_idx])
-        if peak_count > 0 and first_count > 0:
-            log2pd = math.log2((peak_count + pseudo_count) / (first_count + pseudo_count))
-        else:
-            log2pd = 0.0
+        first_freq = float(freqs[nonzero_indices[0]])
+        peak_freq = float(freqs[peak_idx])
+        log2pd = math.log2(peak_freq / first_freq) if first_freq > 0 and peak_freq > 0 else 0.0
     else:
         log2pd = 0.0
 
@@ -530,7 +517,6 @@ def build_temporal_line_data(
     df: pl.DataFrame,
     timepoint_order: list[str],
     top_n: int,
-    pseudo_count: float,
 ) -> pl.DataFrame:
     """Build temporal line plot data for top N clones ranked by Log2 Peak Delta."""
     df = df.filter(
@@ -563,7 +549,7 @@ def build_temporal_line_data(
         if len(nonzero) >= 1:
             first_freq = float(freqs[nonzero[0]])
             peak_freq = float(freqs[peak_idx])
-            log2pd = abs(math.log2((peak_freq + pseudo_count) / (first_freq + pseudo_count))) if first_freq > 0 and peak_freq > 0 else 0.0
+            log2pd = abs(math.log2(peak_freq / first_freq)) if first_freq > 0 and peak_freq > 0 else 0.0
         else:
             log2pd = 0.0
         element_scores.append({"elementId": eid, "score": log2pd})
@@ -635,12 +621,11 @@ def main():
     # Temporal metrics
     if args.has_timepoint and len(timepoint_order) >= 2:
         temporal = compute_temporal_metrics(df, timepoint_order, has_subject, mode,
-                                           args.pseudo_count, args.min_subject_count)
+                                           args.min_subject_count)
         if len(temporal) > 0:
             temporal.write_csv(f"{prefix}_temporal.csv")
 
-        line_data = build_temporal_line_data(df, timepoint_order, args.top_n,
-                                            args.pseudo_count)
+        line_data = build_temporal_line_data(df, timepoint_order, args.top_n)
         if len(line_data) > 0:
             line_data.write_csv(f"{prefix}_temporal_line.csv")
 
