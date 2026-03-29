@@ -597,13 +597,14 @@ def main():
     else:
         df = compute_relative_frequency(df)
 
-    # Subject prevalence (always computed)
-    prevalence = compute_subject_prevalence(df, has_subject)
-    prevalence.write_csv(f"{prefix}_prevalence.csv")
+    # Subject prevalence (only when subject variable is set)
+    prevalence = None
+    if has_subject:
+        prevalence = compute_subject_prevalence(df, has_subject)
+        prevalence.write_csv(f"{prefix}_prevalence.csv")
 
-    # Prevalence histogram
-    histogram = build_prevalence_histogram(prevalence)
-    histogram.write_csv(f"{prefix}_prevalence_histogram.csv")
+        histogram = build_prevalence_histogram(prevalence)
+        histogram.write_csv(f"{prefix}_prevalence_histogram.csv")
 
     # Grouping metrics
     grouping = None
@@ -629,8 +630,11 @@ def main():
         if len(line_data) > 0:
             line_data.write_csv(f"{prefix}_temporal_line.csv")
 
-    # Combined main table
-    main_table = prevalence
+    # Combined main table — start from prevalence if available, else unique elementIds
+    if prevalence is not None:
+        main_table = prevalence
+    else:
+        main_table = df.select("elementId").unique()
 
     if args.has_grouping:
         try:

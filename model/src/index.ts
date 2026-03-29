@@ -55,7 +55,7 @@ export function getDefaultBlockArgs(): BlockArgs {
     normalization: 'relative-frequency',
     presenceThreshold: 0,
     minAbundanceThreshold: 0,
-    minSubjectCount: 2,
+    minSubjectCount: 1,
     topN: 20,
   };
 }
@@ -67,7 +67,7 @@ export const model = BlockModel.create()
   .withUiState<UiState>({
     tableState: createPlDataTableStateV2(),
     heatmapState: {
-      title: 'Grouping heatmap',
+      title: 'Distribution heatmap',
       template: 'heatmap',
       currentTab: null,
     },
@@ -199,16 +199,21 @@ export const model = BlockModel.create()
 
   .output('isRunning', (ctx) => ctx.outputs?.getIsReadyOrError() === false)
 
-  .title(() => 'Spatiotemporal Analysis')
+  .title(() => 'Clonotype Distribution')
 
   .subtitle((ctx) => ctx.args.customBlockLabel || ctx.args.defaultBlockLabel)
 
-  .sections((_ctx) => [
-    { type: 'link', href: '/', label: 'Main' },
-    { type: 'link', href: '/heatmap', label: 'Grouping Heatmap' },
-    { type: 'link', href: '/temporal', label: 'Temporal Trajectory' },
-    { type: 'link', href: '/prevalence', label: 'Subject Prevalence' },
-  ])
+  .sections((ctx) => {
+    const sections: { type: 'link'; href: `/${string}`; label: string }[] = [
+      { type: 'link', href: '/', label: 'Main' },
+      { type: 'link', href: '/heatmap', label: 'Distribution Heatmap' },
+      { type: 'link', href: '/temporal', label: 'Temporal Trajectory' },
+    ];
+    if (ctx.args.subjectColumnRef !== undefined) {
+      sections.push({ type: 'link', href: '/prevalence', label: 'Subject Prevalence' });
+    }
+    return sections;
+  })
 
   .done(2);
 

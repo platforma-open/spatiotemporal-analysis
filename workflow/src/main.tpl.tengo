@@ -86,9 +86,13 @@ wf.body(func(args) {
 	}
 
 	runAnalysis = runAnalysis.
-		saveFile("result_main.csv").
-		saveFile("result_prevalence.csv").
-		saveFile("result_prevalence_histogram.csv")
+		saveFile("result_main.csv")
+
+	if hasSubject {
+		runAnalysis = runAnalysis.
+			saveFile("result_prevalence.csv").
+			saveFile("result_prevalence_histogram.csv")
+	}
 
 	if hasGrouping {
 		runAnalysis = runAnalysis.
@@ -109,7 +113,7 @@ wf.body(func(args) {
 
 	elementAxisSpec := abundanceSpec.axesSpec[1]
 
-	traceLabel := "Spatiotemporal Analysis - " + mode
+	traceLabel := "Clonotype Distribution - " + mode
 	if normalization == "clr" {
 		traceLabel = traceLabel + " (CLR)"
 	}
@@ -122,39 +126,40 @@ wf.body(func(args) {
 	// Main import columns
 	mainImportColumns := []
 
-	// Subject prevalence
-	mainImportColumns = append(mainImportColumns, {
-		column: "subjectPrevalence", id: "subjectPrevalence",
-		spec: {
-			name: "pl7.app/vdj/subjectPrevalence", valueType: "Int",
-			domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
-			annotations: {
-				"pl7.app/label": "Subject Prevalence",
-				"pl7.app/isScore": "true",
-				"pl7.app/score/rankingOrder": "descending",
-				"pl7.app/score/defaultCutoff": "2",
-				"pl7.app/table/visibility": "default",
-				"pl7.app/table/orderPriority": "110"
+	// Subject prevalence (only when subject variable is set)
+	if hasSubject {
+		mainImportColumns = append(mainImportColumns, {
+			column: "subjectPrevalence", id: "subjectPrevalence",
+			spec: {
+				name: "pl7.app/vdj/subjectPrevalence", valueType: "Int",
+				domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
+				annotations: {
+					"pl7.app/label": "Subject Prevalence",
+					"pl7.app/isScore": "true",
+					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/defaultCutoff": "2",
+					"pl7.app/table/visibility": "default",
+					"pl7.app/table/orderPriority": "110"
+				}
 			}
-		}
-	})
+		})
 
-	// Subject prevalence fraction
-	mainImportColumns = append(mainImportColumns, {
-		column: "subjectPrevalenceFraction", id: "subjectPrevalenceFraction",
-		spec: {
-			name: "pl7.app/vdj/subjectPrevalenceFraction", valueType: "Double",
-			domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
-			annotations: {
-				"pl7.app/label": "Subject Prevalence Fraction",
-				"pl7.app/isScore": "true",
-				"pl7.app/score/rankingOrder": "descending",
-				"pl7.app/table/visibility": "optional",
-				"pl7.app/table/orderPriority": "109",
-				"pl7.app/format": ".3f"
+		mainImportColumns = append(mainImportColumns, {
+			column: "subjectPrevalenceFraction", id: "subjectPrevalenceFraction",
+			spec: {
+				name: "pl7.app/vdj/subjectPrevalenceFraction", valueType: "Double",
+				domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
+				annotations: {
+					"pl7.app/label": "Subject Prevalence Fraction",
+					"pl7.app/isScore": "true",
+					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/table/visibility": "optional",
+					"pl7.app/table/orderPriority": "109",
+					"pl7.app/format": ".3f"
+				}
 			}
-		}
-	})
+		})
+	}
 
 	// Grouping metrics
 	if hasGrouping {
@@ -399,31 +404,36 @@ wf.body(func(args) {
 		}, {cpu: 1, mem: "8GiB"})
 	}
 
-	// Prevalence histogram PFrame
-	prevalenceHistCsv := runAnalysis.getFile("result_prevalence_histogram.csv")
-	prevalenceHistogramPf := xsv.importFile(prevalenceHistCsv, "csv", {
-		axes: [{
-			column: "prevalenceCount",
-			spec: {
-				name: "pl7.app/vdj/spatiotemporalAnalysis/prevalenceCount",
-				type: "Int",
-				annotations: {"pl7.app/label": "Number of Subjects"}
-			}
-		}],
-		columns: [{
-			column: "cloneCount", id: "cloneCount",
-			spec: {
-				name: "pl7.app/vdj/cloneCount", valueType: "Int",
-				annotations: {"pl7.app/label": "Number of Clones"}
-			}
-		}],
-		storageFormat: "Parquet",
-		partitionKeyLength: 0
-	}, {cpu: 1, mem: "8GiB"})
+	// Prevalence histogram PFrame (only when subject variable is set)
+	prevalenceHistogramPf := undefined
+	if hasSubject {
+		prevalenceHistCsv := runAnalysis.getFile("result_prevalence_histogram.csv")
+		prevalenceHistogramPf = xsv.importFile(prevalenceHistCsv, "csv", {
+			axes: [{
+				column: "prevalenceCount",
+				spec: {
+					name: "pl7.app/vdj/spatiotemporalAnalysis/prevalenceCount",
+					type: "Int",
+					annotations: {"pl7.app/label": "Number of Subjects"}
+				}
+			}],
+			columns: [{
+				column: "cloneCount", id: "cloneCount",
+				spec: {
+					name: "pl7.app/vdj/cloneCount", valueType: "Int",
+					annotations: {"pl7.app/label": "Number of Clones"}
+				}
+			}],
+			storageFormat: "Parquet",
+			partitionKeyLength: 0
+		}, {cpu: 1, mem: "8GiB"})
+	}
 
 	outputs := {
-		mainPf: pframes.exportFrame(mainPf),
-		prevalenceHistogramPf: pframes.exportFrame(prevalenceHistogramPf)
+		mainPf: pframes.exportFrame(mainPf)
+	}
+	if prevalenceHistogramPf != undefined {
+		outputs.prevalenceHistogramPf = pframes.exportFrame(prevalenceHistogramPf)
 	}
 	if heatmapPf != undefined {
 		outputs.heatmapPf = pframes.exportFrame(heatmapPf)

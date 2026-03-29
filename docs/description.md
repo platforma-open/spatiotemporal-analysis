@@ -21,6 +21,6 @@ Supports relative frequency normalization and centered log-ratio (CLR) transform
 ## Outputs
 
 - Summary table with all computed metrics per clone
-- Grouping heatmap showing clone distribution across categories
+- Distribution heatmap showing clone distribution across categories
 - Temporal trajectory plot for top expanding clones
 - Subject prevalence histogram
