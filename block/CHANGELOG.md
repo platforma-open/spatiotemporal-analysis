@@ -1,5 +1,11 @@
 # @platforma-open/milaboratories.spatiotemporal-analysis
 
+## 1.0.3
+
+### Patch Changes
+
+- 5434b0e: Remove pseudo-count parameter: fold-changes use only detected timepoints where frequency is always nonzero
+
 ## 1.0.2
 
 ### Patch Changes
