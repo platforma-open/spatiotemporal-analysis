@@ -200,7 +200,7 @@ def compute_grouping_metrics(
 
     if not has_subject:
         # No subject: treat all samples as pooled
-        return _compute_pooled_grouping(df, categories, presence_threshold)
+        return _compute_pooled_grouping(df, categories, presence_threshold).sort("elementId")
 
     per_subject_grouping = (
         df.group_by(["elementId", COL_SUBJECT, COL_GROUPING])
@@ -250,7 +250,7 @@ def compute_grouping_metrics(
 
     if not results:
         return pl.DataFrame()
-    return pl.DataFrame(results)
+    return pl.DataFrame(results).sort("elementId")
 
 
 def _compute_pooled_grouping(
@@ -370,7 +370,7 @@ def compute_temporal_metrics(
 
         if not results:
             return pl.DataFrame()
-        return pl.DataFrame(results)
+        return pl.DataFrame(results).sort("elementId")
 
     else:
         # Intra-subject: per-subject metrics then average
@@ -396,9 +396,12 @@ def compute_temporal_metrics(
             eid = element_id[0] if isinstance(element_id, tuple) else element_id
             n_subjects = len(group)
             enough = n_subjects >= min_subject_count
+            # Deterministic mode: pick alphabetically first among most frequent
+            modes = group["peakTimepoint"].mode().sort().to_list()
+            peak_tp = modes[0] if modes else None
             row = {
                 "elementId": eid,
-                "peakTimepoint": group["peakTimepoint"].mode().to_list()[0] if len(group) > 0 else None,
+                "peakTimepoint": peak_tp,
                 "temporalShiftIndex": float(group["temporalShiftIndex"].mean()) if enough else float("nan"),
                 "log2KineticDelta": float(group["log2KineticDelta"].mean()) if enough else float("nan"),
                 "log2PeakDelta": float(group["log2PeakDelta"].mean()) if enough else float("nan"),
@@ -407,7 +410,7 @@ def compute_temporal_metrics(
 
         if not results:
             return pl.DataFrame()
-        return pl.DataFrame(results)
+        return pl.DataFrame(results).sort("elementId")
 
 
 def _compute_temporal_for_element(
@@ -485,7 +488,7 @@ def compute_subject_prevalence(df: pl.DataFrame, has_subject: bool) -> pl.DataFr
     prevalence = prevalence.with_columns(
         (pl.col("subjectPrevalence").cast(pl.Float64) / float(total)).alias("subjectPrevalenceFraction")
     )
-    return prevalence
+    return prevalence.sort("elementId")
 
 
 def build_heatmap_data(
@@ -504,13 +507,13 @@ def build_heatmap_data(
     if grouping_metrics is not None and "ri" in grouping_metrics.columns and len(grouping_metrics) > 0:
         top_elements = (
             grouping_metrics.filter(pl.col("ri").is_not_null())
-            .sort("ri", descending=True)
+            .sort(["ri", "elementId"], descending=[True, False])
             .head(top_n)["elementId"]
             .to_list()
         )
         heatmap = heatmap.filter(pl.col("elementId").is_in(top_elements))
 
-    return heatmap.rename({COL_GROUPING: "groupCategory"})
+    return heatmap.rename({COL_GROUPING: "groupCategory"}).sort("elementId", "groupCategory")
 
 
 def build_temporal_line_data(
@@ -531,7 +534,7 @@ def build_temporal_line_data(
             df.group_by(["elementId", COL_TIMEPOINT])
             .agg(pl.col("frequency").mean().alias("frequency"))
         )
-        return line_data.rename({COL_TIMEPOINT: "timepointValue"})
+        return line_data.rename({COL_TIMEPOINT: "timepointValue"}).sort("elementId", "timepointValue")
 
     # Compute Log2 Peak Delta per element for ranking
     per_tp = (
@@ -557,7 +560,7 @@ def build_temporal_line_data(
     if not element_scores:
         return pl.DataFrame()
 
-    scores_df = pl.DataFrame(element_scores).sort("score", descending=True).head(top_n)
+    scores_df = pl.DataFrame(element_scores).sort(["score", "elementId"], descending=[True, False]).head(top_n)
     top_elements = set(scores_df["elementId"].to_list())
 
     # Filter to top N elements
@@ -566,7 +569,7 @@ def build_temporal_line_data(
         .group_by(["elementId", COL_TIMEPOINT])
         .agg(pl.col("frequency").mean().alias("frequency"))
     )
-    return line_data.rename({COL_TIMEPOINT: "timepointValue"})
+    return line_data.rename({COL_TIMEPOINT: "timepointValue"}).sort("elementId", "timepointValue")
 
 
 def build_prevalence_histogram(prevalence_df: pl.DataFrame) -> pl.DataFrame:
@@ -634,7 +637,7 @@ def main():
     if prevalence is not None:
         main_table = prevalence
     else:
-        main_table = df.select("elementId").unique()
+        main_table = df.select("elementId").unique().sort("elementId")
 
     if args.has_grouping:
         try:
@@ -650,6 +653,7 @@ def main():
         except Exception:
             pass
 
+    main_table = main_table.sort("elementId")
     main_table.write_csv(f"{prefix}_main.csv")
 
     print(f"Analysis complete. Mode: {mode}, Normalization: {args.normalization}")

@@ -107,8 +107,8 @@ wf.body(func(args) {
 	}
 
 	runAnalysis = runAnalysis.
-		printErrStreamToStdout().
-		saveStdoutContent().
+		//printErrStreamToStdout(). <- do not save stdout content as it is unused 
+		//saveStdoutContent(). to prevent CID conflicts
 		run()
 
 	elementAxisSpec := abundanceSpec.axesSpec[1]
