@@ -138,7 +138,7 @@ const isAdvancedOpen = ref(false);
   <PlBlockPage
     v-model:subtitle="app.model.args.customBlockLabel"
     :subtitle-placeholder="app.model.args.defaultBlockLabel"
-    title="Spatiotemporal Analysis"
+    title="Clonotype Distribution"
   >
     <template #append>
       <PlBtnGhost @click.stop="showSettings">
@@ -194,14 +194,25 @@ const isAdvancedOpen = ref(false);
       :options="app.model.outputs.metadataOptions"
       label="Grouping variable"
       clearable
-    />
+    >
+      <template #tooltip>
+        Categorical metadata column (e.g. tissue, organ) used to compute
+        distribution metrics: restriction index, dominant group, and breadth.
+      </template>
+    </PlDropdown>
 
     <PlDropdown
       v-model="app.model.args.temporalColumnRef"
       :options="app.model.outputs.metadataOptions"
       label="Temporal variable"
       clearable
-    />
+    >
+      <template #tooltip>
+        Ordered metadata column (e.g. timepoint, day) used to compute
+        temporal expansion metrics: Log2 Peak Delta, Temporal Shift Index,
+        and Log2 Kinetic Delta.
+      </template>
+    </PlDropdown>
 
     <PlAccordion multiple>
       <PlAccordionSection
@@ -266,7 +277,7 @@ const isAdvancedOpen = ref(false);
         >
           <template #tooltip>
             Averaged cross-subject metrics (Mean RI, Mean Log2PD, etc.) are set to NaN
-            when a clone is present in fewer subjects than this threshold. Default: 2.
+            when a clone is present in fewer subjects than this threshold. Default: 1 (no filtering).
           </template>
         </PlNumberField>
 
