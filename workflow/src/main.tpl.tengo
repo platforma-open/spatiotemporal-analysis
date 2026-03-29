@@ -136,7 +136,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Subject Prevalence",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/score/defaultCutoff": "2",
 					"pl7.app/table/visibility": "default",
 					"pl7.app/table/orderPriority": "110"
@@ -152,7 +152,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Subject Prevalence Fraction",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/table/visibility": "optional",
 					"pl7.app/table/orderPriority": "109",
 					"pl7.app/format": ".3f"
@@ -176,7 +176,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Restriction Index",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/score/defaultCutoff": "0.5",
 					"pl7.app/table/visibility": "default",
 					"pl7.app/table/orderPriority": "100",
@@ -208,7 +208,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Breadth",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/table/visibility": "optional",
 					"pl7.app/table/orderPriority": "90"
 				}
@@ -239,7 +239,7 @@ wf.body(func(args) {
 					annotations: {
 						"pl7.app/label": "Mean RI",
 						"pl7.app/isScore": "true",
-						"pl7.app/score/rankingOrder": "descending",
+						"pl7.app/score/rankingOrder": "decreasing",
 						"pl7.app/table/visibility": "optional",
 						"pl7.app/table/orderPriority": "65",
 						"pl7.app/format": ".3f"
@@ -255,7 +255,7 @@ wf.body(func(args) {
 					annotations: {
 						"pl7.app/label": "RI StdDev",
 						"pl7.app/isScore": "true",
-						"pl7.app/score/rankingOrder": "ascending",
+						"pl7.app/score/rankingOrder": "increasing",
 						"pl7.app/table/visibility": "optional",
 						"pl7.app/table/orderPriority": "60",
 						"pl7.app/format": ".3f"
@@ -292,7 +292,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Log2 Peak Delta",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/table/visibility": "default",
 					"pl7.app/table/orderPriority": "77",
 					"pl7.app/format": ".2f"
@@ -308,7 +308,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Temporal Shift Index",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/table/visibility": "optional",
 					"pl7.app/table/orderPriority": "80",
 					"pl7.app/format": ".3f"
@@ -324,7 +324,7 @@ wf.body(func(args) {
 				annotations: {
 					"pl7.app/label": "Log2 Kinetic Delta",
 					"pl7.app/isScore": "true",
-					"pl7.app/score/rankingOrder": "descending",
+					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/table/visibility": "optional",
 					"pl7.app/table/orderPriority": "75",
 					"pl7.app/format": ".2f"
