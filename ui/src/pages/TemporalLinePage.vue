@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { PredefinedGraphOption } from '@milaboratories/graph-maker';
 import { GraphMaker } from '@milaboratories/graph-maker';
-import '@milaboratories/graph-maker/styles';
 import { computed } from 'vue';
 import { useApp } from '../app';
 
@@ -25,7 +24,7 @@ const defaultOptions = computed((): PredefinedGraphOption<'scatterplot'>[] | nul
 
 <template>
   <GraphMaker
-    v-model="app.model.ui.temporalLineState"
+    v-model="app.model.data.temporalLineState"
     chartType="scatterplot"
     :p-frame="app.model.outputs.temporalLinePf"
     :defaultOptions="defaultOptions"

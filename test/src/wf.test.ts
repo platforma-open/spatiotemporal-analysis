@@ -1,15 +1,11 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-explicit-any */
-import {
-  getDefaultBlockArgs,
-} from '@platforma-open/milaboratories.spatiotemporal-analysis.model';
 import type {
-  BlockArgs,
+  BlockData,
+  BlockOutputs,
+  model,
 } from '@platforma-open/milaboratories.spatiotemporal-analysis.model';
 import { blockSpec as clonotypingBlockSpec } from '@platforma-open/milaboratories.mixcr-clonotyping-2';
 import type {
-  BlockArgs as MiXCRClonotypingBlockArgs,
   BlockOutputs as MiXCRClonotypingBlockOutputs,
-  platforma as mixcrPlatforma,
 } from '@platforma-open/milaboratories.mixcr-clonotyping-2.model';
 import {
   SupportedPresetList,
@@ -18,9 +14,36 @@ import {
 import { blockSpec as samplesAndDataBlockSpec } from '@platforma-open/milaboratories.samples-and-data';
 import type { BlockArgs as SamplesAndDataBlockArgs } from '@platforma-open/milaboratories.samples-and-data.model';
 import type { InferBlockState } from '@platforma-sdk/model';
-import { wrapOutputs } from '@platforma-sdk/model';
+import { createPlDataTableStateV2, wrapOutputs } from '@platforma-sdk/model';
 import { awaitStableState, blockTest } from '@platforma-sdk/test';
 import { blockSpec as compartmentAnalysisBlockSpec } from 'this-block';
+
+const defaultUiState = {
+  tableState: createPlDataTableStateV2(),
+  heatmapState: {
+    title: 'Distribution heatmap',
+    template: 'heatmap',
+    currentTab: null,
+  },
+  temporalLineState: {
+    title: 'Temporal frequency trajectory',
+    template: 'curve_dots',
+    currentTab: null,
+    layersSettings: {
+      curve: {
+        smoothing: false,
+      },
+    },
+  },
+  prevalenceHistogramState: {
+    title: 'Subject prevalence distribution',
+    template: 'bar',
+    currentTab: null,
+    layersSettings: {
+      bar: { fillColor: '#5b9bd5' },
+    },
+  },
+};
 
 blockTest(
   'compartment analysis with 3 bulk samples',
@@ -124,12 +147,16 @@ blockTest(
     });
 
     // Step 3: Configure and run MiXCR Clonotyping
+    // MiXCR is a PlatformaV2-extended block; its model type does not satisfy the V3 Platforma
+    // constraint on InferBlockState<T>, so we use any at this cross-block boundary.
+    /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access */
     const clonotypingStableState1 = (await awaitStableState(
       project.getBlockState(clonotypingBlockId),
       200000,
-    )) as InferBlockState<typeof mixcrPlatforma>;
+    )) as any;
 
     const clonotypingOutputs1 = wrapOutputs<MiXCRClonotypingBlockOutputs>(clonotypingStableState1.outputs);
+    /* eslint-enable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access */
     expect(clonotypingOutputs1.presets).toBeDefined();
 
     const presets = SupportedPresetList.parse(
@@ -145,79 +172,93 @@ blockTest(
       input: clonotypingOutputs1.inputOptions[0].ref,
       preset: { type: 'name', name: 'neb-human-rna-xcr-umi-nebnext' },
       chains: ['IGHeavy'],
-    } satisfies MiXCRClonotypingBlockArgs);
+    } as unknown);
 
     await project.runBlock(clonotypingBlockId);
-    const clonotypingStableState3 = await helpers.awaitBlockDoneAndGetStableBlockState<typeof mixcrPlatforma>(
+    /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access */
+    const clonotypingStableState3 = (await helpers.awaitBlockDoneAndGetStableBlockState(
       clonotypingBlockId,
       300000,
-    );
+    )) as any;
     const clonotypingOutputs3 = wrapOutputs<MiXCRClonotypingBlockOutputs>(clonotypingStableState3.outputs);
+    /* eslint-enable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access */
     expect(clonotypingOutputs3.reports.isComplete).toEqual(true);
     console.log('MiXCR Clonotyping completed successfully');
 
     // Step 4: Wait for Compartment Analysis to detect inputs from result pool
-    const compartmentState1 = await awaitStableState(
+    const compartmentState1 = (await awaitStableState(
       project.getBlockState(compartmentBlockId),
       300000,
-    );
+    )) as InferBlockState<typeof model>;
 
-    const compartmentOutputs1 = compartmentState1.outputs as Record<string, any>;
+    const compartmentOutputs1 = wrapOutputs<BlockOutputs>(compartmentState1.outputs);
 
     // Verify abundance options
-    expect(compartmentOutputs1.abundanceOptions?.ok).toBe(true);
-    const abundanceOpts = compartmentOutputs1.abundanceOptions?.value ?? [];
+    const abundanceOpts = compartmentOutputs1.abundanceOptions ?? [];
     expect(abundanceOpts.length, 'Should have abundance options').toBeGreaterThan(0);
-    console.log('Abundance options:', abundanceOpts.map((o: any) => o.label));
+    console.log('Abundance options:', abundanceOpts.map((o) => o.label));
 
     // Step 4b: Set abundanceRef first so metadata options can resolve
-    await project.setBlockArgs(compartmentBlockId, {
-      ...getDefaultBlockArgs(),
-      abundanceRef: abundanceOpts[0].ref,
-    } satisfies BlockArgs);
+    await project.mutateBlockStorage(compartmentBlockId, {
+      operation: 'update-block-data',
+      value: {
+        defaultBlockLabel: '',
+        customBlockLabel: '',
+        calculationMode: 'population',
+        timepointOrder: [],
+        normalization: 'relative-frequency',
+        presenceThreshold: 0,
+        minAbundanceThreshold: 0,
+        minSubjectCount: 1,
+        topN: 20,
+        abundanceRef: abundanceOpts[0].ref,
+        ...defaultUiState,
+      } as BlockData,
+    });
 
     // Wait for metadata options to populate
-    const compartmentState1b = await awaitStableState(
+    const compartmentState1b = (await awaitStableState(
       project.getBlockState(compartmentBlockId),
       60000,
-    );
-    const compartmentOutputs1b = compartmentState1b.outputs as Record<string, any>;
+    )) as InferBlockState<typeof model>;
+    const compartmentOutputs1b = wrapOutputs<BlockOutputs>(compartmentState1b.outputs);
 
-    expect(compartmentOutputs1b.metadataOptions?.ok).toBe(true);
-    const metadataOpts = compartmentOutputs1b.metadataOptions?.value ?? [];
+    const metadataOpts = compartmentOutputs1b.metadataOptions ?? [];
     expect(metadataOpts.length, 'Should have metadata options').toBeGreaterThan(0);
-    console.log('Metadata options:', metadataOpts.map((o: any) => o.label));
+    console.log('Metadata options:', metadataOpts.map((o) => o.label));
 
     // Find metadata columns
-    const tissueOption = metadataOpts.find((o: any) => o.label?.includes('Tissue'));
-    const donorOption = metadataOpts.find((o: any) => o.label?.includes('Donor'));
-    const timepointOption = metadataOpts.find((o: any) => o.label?.includes('Timepoint'));
+    const tissueOption = metadataOpts.find((o) => o.label?.includes('Tissue'));
+    const donorOption = metadataOpts.find((o) => o.label?.includes('Donor'));
+    const timepointOption = metadataOpts.find((o) => o.label?.includes('Timepoint'));
 
     expect(tissueOption, 'Tissue metadata option').toBeDefined();
     expect(donorOption, 'Donor metadata option').toBeDefined();
 
     // Step 5: Configure Compartment Analysis with full args
-    const blockArgs: BlockArgs = {
-      defaultBlockLabel: '',
-      customBlockLabel: '',
-      abundanceRef: abundanceOpts[0].ref,
-      calculationMode: 'population',
-      groupingColumnRef: tissueOption.value,
-      temporalColumnRef: timepointOption?.value,
-      timepointOrder: timepointOption ? ['Day 0', 'Day 7'] : [],
-      subjectColumnRef: donorOption.value,
-      normalization: 'relative-frequency',
-      presenceThreshold: 0,
-      minAbundanceThreshold: 0,
-      minSubjectCount: 2,
-      topN: 20,
-    };
-
-    await project.setBlockArgs(compartmentBlockId, blockArgs);
+    await project.mutateBlockStorage(compartmentBlockId, {
+      operation: 'update-block-data',
+      value: {
+        defaultBlockLabel: '',
+        customBlockLabel: '',
+        calculationMode: 'population',
+        groupingColumnRef: tissueOption!.value,
+        temporalColumnRef: timepointOption?.value,
+        timepointOrder: timepointOption ? ['Day 0', 'Day 7'] : [],
+        subjectColumnRef: donorOption!.value,
+        normalization: 'relative-frequency',
+        presenceThreshold: 0,
+        minAbundanceThreshold: 0,
+        minSubjectCount: 2,
+        topN: 20,
+        abundanceRef: abundanceOpts[0].ref,
+        ...defaultUiState,
+      } as BlockData,
+    });
 
     // Step 6: Run Compartment Analysis
     await project.runBlock(compartmentBlockId);
-    const compartmentState2 = await helpers.awaitBlockDoneAndGetStableBlockState(
+    const compartmentState2 = await helpers.awaitBlockDoneAndGetStableBlockState<typeof model>(
       compartmentBlockId,
       300000,
     );
@@ -225,12 +266,12 @@ blockTest(
     console.log('Compartment Analysis completed');
 
     // Verify outputs
-    const finalOutputs = compartmentState2.outputs as Record<string, any>;
-    expect(finalOutputs.mainTable?.ok, 'Main table should be ok').toBe(true);
+    const finalOutputs = wrapOutputs<BlockOutputs>(compartmentState2.outputs);
+    expect(finalOutputs.mainTable, 'Main table should be defined').toBeDefined();
 
     // Verify main table has data
-    if (finalOutputs.mainTable?.value?.fullTableHandle) {
-      const shape = await ml.driverKit.pFrameDriver.getShape(finalOutputs.mainTable.value.fullTableHandle);
+    if (finalOutputs.mainTable?.fullTableHandle) {
+      const shape = await ml.driverKit.pFrameDriver.getShape(finalOutputs.mainTable.fullTableHandle);
       console.log('Main table shape:', shape);
       expect(shape.rows, 'Table should have rows').toBeGreaterThan(0);
       expect(shape.columns, 'Table should have columns').toBeGreaterThan(0);

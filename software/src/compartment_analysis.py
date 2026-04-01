@@ -9,7 +9,6 @@ Output: Multiple CSV files with computed metrics.
 import argparse
 import json
 import math
-import sys
 
 import numpy as np
 import polars as pl
@@ -18,10 +17,8 @@ import polars as pl
 def parse_args():
     parser = argparse.ArgumentParser(description="Spatiotemporal analysis")
     parser.add_argument("input_file", help="Input CSV file")
-    parser.add_argument("--calculation-mode", choices=["population", "intra-subject"],
-                        default="population")
-    parser.add_argument("--normalization", choices=["relative-frequency", "clr"],
-                        default="relative-frequency")
+    parser.add_argument("--calculation-mode", choices=["population", "intra-subject"], default="population")
+    parser.add_argument("--normalization", choices=["relative-frequency", "clr"], default="relative-frequency")
     parser.add_argument("--has-grouping", action="store_true")
     parser.add_argument("--has-timepoint", action="store_true")
     parser.add_argument("--has-subject", action="store_true")
@@ -42,8 +39,7 @@ COL_TIMEPOINT = "timepoint"
 ABUNDANCE_NULL_VALUES = ["", "NaN", "nan", "NA", "na", "null", "None"]
 
 
-def read_input(path: str, has_grouping: bool, has_timepoint: bool,
-               min_abundance_threshold: float) -> pl.DataFrame:
+def read_input(path: str, has_grouping: bool, has_timepoint: bool, min_abundance_threshold: float) -> pl.DataFrame:
     """Read input CSV with proper type handling."""
     df = pl.read_csv(path, null_values=ABUNDANCE_NULL_VALUES, infer_schema_length=10000)
 
@@ -68,8 +64,7 @@ def read_input(path: str, has_grouping: bool, has_timepoint: bool,
     return df
 
 
-def average_replicates(df: pl.DataFrame, has_subject: bool, has_grouping: bool,
-                       has_timepoint: bool) -> pl.DataFrame:
+def average_replicates(df: pl.DataFrame, has_subject: bool, has_grouping: bool, has_timepoint: bool) -> pl.DataFrame:
     """Average abundance when multiple samples map to same condition combination."""
     group_cols = ["elementId"]
     if has_subject:
@@ -101,29 +96,20 @@ def average_replicates(df: pl.DataFrame, has_subject: bool, has_grouping: bool,
 
 def compute_relative_frequency(df: pl.DataFrame) -> pl.DataFrame:
     """Compute per-sample relative frequency from abundance."""
-    sample_totals = df.group_by("sampleId").agg(
-        pl.col("abundance").sum().alias("sampleTotal")
-    )
+    sample_totals = df.group_by("sampleId").agg(pl.col("abundance").sum().alias("sampleTotal"))
     df = df.join(sample_totals, on="sampleId")
     df = df.filter(pl.col("sampleTotal") > 0)
-    df = df.with_columns(
-        (pl.col("abundance") / pl.col("sampleTotal")).alias("frequency")
-    ).drop("sampleTotal")
+    df = df.with_columns((pl.col("abundance") / pl.col("sampleTotal")).alias("frequency")).drop("sampleTotal")
     return df
-
 
 
 def compute_clr(df: pl.DataFrame, mode: str, has_subject: bool) -> pl.DataFrame:
     """Compute centered log-ratio transform.
     Global in population mode, per-subject in intra-subject mode."""
-    sample_totals = df.group_by("sampleId").agg(
-        pl.col("abundance").sum().alias("sampleTotal")
-    )
+    sample_totals = df.group_by("sampleId").agg(pl.col("abundance").sum().alias("sampleTotal"))
     df = df.join(sample_totals, on="sampleId")
     df = df.filter(pl.col("sampleTotal") > 0)
-    df = df.with_columns(
-        (pl.col("abundance") / pl.col("sampleTotal")).alias("frequency")
-    ).drop("sampleTotal")
+    df = df.with_columns((pl.col("abundance") / pl.col("sampleTotal")).alias("frequency")).drop("sampleTotal")
 
     # Multiplicative replacement: delta = 0.65 * min(nonzero) / D
     # D = number of components (distinct elementIds per group)
@@ -202,14 +188,11 @@ def compute_grouping_metrics(
         # No subject: treat all samples as pooled
         return _compute_pooled_grouping(df, categories, presence_threshold).sort("elementId")
 
-    per_subject_grouping = (
-        df.group_by(["elementId", COL_SUBJECT, COL_GROUPING])
-        .agg(pl.col("frequency").mean().alias("meanFreq"))
+    per_subject_grouping = df.group_by(["elementId", COL_SUBJECT, COL_GROUPING]).agg(
+        pl.col("frequency").mean().alias("meanFreq")
     )
 
-    per_subject_metrics = _compute_per_subject_grouping(
-        per_subject_grouping, categories, presence_threshold
-    )
+    per_subject_metrics = _compute_per_subject_grouping(per_subject_grouping, categories, presence_threshold)
 
     results = []
     for element_id, group in per_subject_metrics.group_by("elementId"):
@@ -222,8 +205,8 @@ def compute_grouping_metrics(
         mean_ri = float(np.mean(ris)) if enough_subjects and len(ris) > 0 else float("nan")
         std_ri = float(np.std(ris, ddof=1)) if enough_subjects and len(ris) > 1 else float("nan")
 
-        # Consensus dominant: mode, ties broken alphabetically
-        consensus_dominant = _consensus_dominant(dominants)
+        # Consensus dominant: mode, ties broken by highest mean frequency
+        consensus_dominant = _consensus_dominant(dominants, per_subject_grouping, eid, categories)
 
         # Count dominant per category
         count_dominant = {cat: 0 for cat in categories}
@@ -259,10 +242,7 @@ def _compute_pooled_grouping(
     presence_threshold: float,
 ) -> pl.DataFrame:
     """Compute grouping metrics without subject dimension."""
-    per_grouping = (
-        df.group_by(["elementId", COL_GROUPING])
-        .agg(pl.col("frequency").mean().alias("meanFreq"))
-    )
+    per_grouping = df.group_by(["elementId", COL_GROUPING]).agg(pl.col("frequency").mean().alias("meanFreq"))
     results = []
     for element_id, group in per_grouping.group_by("elementId"):
         eid = element_id[0] if isinstance(element_id, tuple) else element_id
@@ -274,12 +254,14 @@ def _compute_pooled_grouping(
         dominant = categories[dominant_idx] if freq_arr[dominant_idx] > 0 else None
         breadth = int(np.sum(freq_arr > presence_threshold))
 
-        results.append({
-            "elementId": eid,
-            "ri": ri,
-            "dominant": dominant,
-            "breadth": breadth,
-        })
+        results.append(
+            {
+                "elementId": eid,
+                "ri": ri,
+                "dominant": dominant,
+                "breadth": breadth,
+            }
+        )
 
     if not results:
         return pl.DataFrame()
@@ -293,9 +275,7 @@ def _compute_per_subject_grouping(
 ) -> pl.DataFrame:
     """Compute per-subject RI, dominant, breadth."""
     results = []
-    for (element_id, subject), group in per_subject_grouping.group_by(
-        ["elementId", COL_SUBJECT]
-    ):
+    for (element_id, subject), group in per_subject_grouping.group_by(["elementId", COL_SUBJECT]):
         freq_map = dict(zip(group[COL_GROUPING].to_list(), group["meanFreq"].to_list()))
         freq_arr = np.array([freq_map.get(cat, 0.0) for cat in categories])
 
@@ -309,21 +289,28 @@ def _compute_per_subject_grouping(
             dominant = sorted(tied)[0]
         breadth = int(np.sum(freq_arr > presence_threshold))
 
-        results.append({
-            "elementId": element_id,
-            COL_SUBJECT: subject,
-            "ri": ri,
-            "dominant": dominant,
-            "breadth": breadth,
-        })
+        results.append(
+            {
+                "elementId": element_id,
+                COL_SUBJECT: subject,
+                "ri": ri,
+                "dominant": dominant,
+                "breadth": breadth,
+            }
+        )
 
     if not results:
         return pl.DataFrame()
     return pl.DataFrame(results)
 
 
-def _consensus_dominant(dominants: list) -> str | None:
-    """Mode of dominants, ties broken alphabetically."""
+def _consensus_dominant(
+    dominants: list,
+    per_subject_grouping: pl.DataFrame | None = None,
+    element_id: str | None = None,
+    categories: list[str] | None = None,
+) -> str | None:
+    """Mode of dominants, ties broken by highest mean frequency across tied subjects."""
     dom_counts: dict[str, int] = {}
     for d in dominants:
         if d is not None:
@@ -332,6 +319,23 @@ def _consensus_dominant(dominants: list) -> str | None:
         return None
     max_count = max(dom_counts.values())
     tied = sorted(k for k, v in dom_counts.items() if v == max_count)
+    if len(tied) == 1:
+        return tied[0]
+
+    # Break ties by highest mean frequency across the tied groups
+    if per_subject_grouping is not None and element_id is not None:
+        elem_data = per_subject_grouping.filter(pl.col("elementId") == element_id)
+        best_group = None
+        best_freq = -1.0
+        for group_name in tied:
+            group_freq = elem_data.filter(pl.col(COL_GROUPING) == group_name)["meanFreq"]
+            mean_freq = float(group_freq.mean()) if len(group_freq) > 0 else 0.0
+            if mean_freq > best_freq or (mean_freq == best_freq and (best_group is None or group_name < best_group)):
+                best_freq = mean_freq
+                best_group = group_name
+        if best_group is not None:
+            return best_group
+
     return tied[0]
 
 
@@ -356,10 +360,7 @@ def compute_temporal_metrics(
     t_count = len(timepoint_order)
 
     if not has_subject or mode == "population":
-        per_tp = (
-            df.group_by(["elementId", COL_TIMEPOINT])
-            .agg(pl.col("frequency").mean().alias("meanFreq"))
-        )
+        per_tp = df.group_by(["elementId", COL_TIMEPOINT]).agg(pl.col("frequency").mean().alias("meanFreq"))
 
         results = []
         for element_id, group in per_tp.group_by("elementId"):
@@ -374,9 +375,8 @@ def compute_temporal_metrics(
 
     else:
         # Intra-subject: per-subject metrics then average
-        per_tp = (
-            df.group_by(["elementId", COL_SUBJECT, COL_TIMEPOINT])
-            .agg(pl.col("frequency").mean().alias("meanFreq"))
+        per_tp = df.group_by(["elementId", COL_SUBJECT, COL_TIMEPOINT]).agg(
+            pl.col("frequency").mean().alias("meanFreq")
         )
 
         per_subject_temporal = []
@@ -498,10 +498,7 @@ def build_heatmap_data(
 ) -> pl.DataFrame:
     """Build heatmap data for top N clones by RI (most restricted)."""
     df = df.filter(pl.col(COL_GROUPING).is_not_null() & (pl.col(COL_GROUPING) != ""))
-    heatmap = (
-        df.group_by(["elementId", COL_GROUPING])
-        .agg(pl.col("frequency").mean().alias("normalizedFrequency"))
-    )
+    heatmap = df.group_by(["elementId", COL_GROUPING]).agg(pl.col("frequency").mean().alias("normalizedFrequency"))
 
     # Filter to top N clones by Restriction Index
     if grouping_metrics is not None and "ri" in grouping_metrics.columns and len(grouping_metrics) > 0:
@@ -530,17 +527,11 @@ def build_temporal_line_data(
 
     t_count = len(timepoint_order)
     if t_count < 2:
-        line_data = (
-            df.group_by(["elementId", COL_TIMEPOINT])
-            .agg(pl.col("frequency").mean().alias("frequency"))
-        )
+        line_data = df.group_by(["elementId", COL_TIMEPOINT]).agg(pl.col("frequency").mean().alias("frequency"))
         return line_data.rename({COL_TIMEPOINT: "timepointValue"}).sort("elementId", "timepointValue")
 
     # Compute Log2 Peak Delta per element for ranking
-    per_tp = (
-        df.group_by(["elementId", COL_TIMEPOINT])
-        .agg(pl.col("frequency").mean().alias("meanFreq"))
-    )
+    per_tp = df.group_by(["elementId", COL_TIMEPOINT]).agg(pl.col("frequency").mean().alias("meanFreq"))
 
     element_scores = []
     for element_id, group in per_tp.group_by("elementId"):
@@ -584,8 +575,7 @@ def build_prevalence_histogram(prevalence_df: pl.DataFrame) -> pl.DataFrame:
 def main():
     args = parse_args()
 
-    df = read_input(args.input_file, args.has_grouping, args.has_timepoint,
-                    args.min_abundance_threshold)
+    df = read_input(args.input_file, args.has_grouping, args.has_timepoint, args.min_abundance_threshold)
     timepoint_order = json.loads(args.timepoint_order)
     mode = args.calculation_mode
     prefix = args.output_prefix
@@ -612,20 +602,19 @@ def main():
     # Grouping metrics
     grouping = None
     if args.has_grouping:
-        grouping = compute_grouping_metrics(df, has_subject, mode,
-                                            args.presence_threshold, args.min_subject_count)
+        grouping = compute_grouping_metrics(df, has_subject, mode, args.presence_threshold, args.min_subject_count)
         if len(grouping) > 0:
             grouping.write_csv(f"{prefix}_grouping.csv")
 
-        heatmap = build_heatmap_data(df, grouping if grouping is not None and len(grouping) > 0 else None,
-                                     top_n=args.top_n)
+        heatmap = build_heatmap_data(
+            df, grouping if grouping is not None and len(grouping) > 0 else None, top_n=args.top_n
+        )
         if len(heatmap) > 0:
             heatmap.write_csv(f"{prefix}_heatmap.csv")
 
     # Temporal metrics
     if args.has_timepoint and len(timepoint_order) >= 2:
-        temporal = compute_temporal_metrics(df, timepoint_order, has_subject, mode,
-                                           args.min_subject_count)
+        temporal = compute_temporal_metrics(df, timepoint_order, has_subject, mode, args.min_subject_count)
         if len(temporal) > 0:
             temporal.write_csv(f"{prefix}_temporal.csv")
 

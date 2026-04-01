@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { PredefinedGraphOption } from '@milaboratories/graph-maker';
 import { GraphMaker } from '@milaboratories/graph-maker';
-import '@milaboratories/graph-maker/styles';
 import { computed } from 'vue';
 import { useApp } from '../app';
 
@@ -24,7 +23,7 @@ const defaultOptions = computed((): PredefinedGraphOption<'discrete'>[] | null =
 
 <template>
   <GraphMaker
-    v-model="app.model.ui.prevalenceHistogramState"
+    v-model="app.model.data.prevalenceHistogramState"
     chartType="discrete"
     :p-frame="app.model.outputs.prevalenceHistogramPf"
     :defaultOptions="defaultOptions"

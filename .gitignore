@@ -11,3 +11,13 @@ test-dry-run.json
 vite.config.*.timestamp-*
 .DS_Store
 /.idea
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+uv.lock
+.coverage

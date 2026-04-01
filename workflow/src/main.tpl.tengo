@@ -112,6 +112,7 @@ wf.body(func(args) {
 		run()
 
 	elementAxisSpec := abundanceSpec.axesSpec[1]
+	blockDomain := {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId}
 
 	traceLabel := "Clonotype Distribution - " + mode
 	if normalization == "clr" {
@@ -132,7 +133,7 @@ wf.body(func(args) {
 			column: "subjectPrevalence", id: "subjectPrevalence",
 			spec: {
 				name: "pl7.app/vdj/subjectPrevalence", valueType: "Int",
-				domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
+				domain: blockDomain,
 				annotations: {
 					"pl7.app/label": "Subject Prevalence",
 					"pl7.app/isScore": "true",
@@ -148,7 +149,7 @@ wf.body(func(args) {
 			column: "subjectPrevalenceFraction", id: "subjectPrevalenceFraction",
 			spec: {
 				name: "pl7.app/vdj/subjectPrevalenceFraction", valueType: "Double",
-				domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
+				domain: blockDomain,
 				annotations: {
 					"pl7.app/label": "Subject Prevalence Fraction",
 					"pl7.app/isScore": "true",
@@ -364,6 +365,7 @@ wf.body(func(args) {
 				{column: "groupCategory", spec: {
 					name: "pl7.app/vdj/spatiotemporalAnalysis/groupCategory",
 					type: "String",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Group"}
 				}}
 			],
@@ -371,6 +373,7 @@ wf.body(func(args) {
 				column: "normalizedFrequency", id: "normalizedFrequency",
 				spec: {
 					name: "pl7.app/vdj/normalizedFrequency", valueType: "Double",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Relative Frequency", "pl7.app/format": ".4f"}
 				}
 			}],
@@ -389,6 +392,7 @@ wf.body(func(args) {
 				{column: "timepointValue", spec: {
 					name: "pl7.app/vdj/spatiotemporalAnalysis/timepoint",
 					type: "String",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Timepoint"}
 				}}
 			],
@@ -396,6 +400,7 @@ wf.body(func(args) {
 				column: "frequency", id: "frequency",
 				spec: {
 					name: "pl7.app/vdj/frequency", valueType: "Double",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Frequency", "pl7.app/format": ".6f"}
 				}
 			}],
@@ -414,6 +419,7 @@ wf.body(func(args) {
 				spec: {
 					name: "pl7.app/vdj/spatiotemporalAnalysis/prevalenceCount",
 					type: "Int",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Number of Subjects"}
 				}
 			}],
@@ -421,6 +427,7 @@ wf.body(func(args) {
 				column: "cloneCount", id: "cloneCount",
 				spec: {
 					name: "pl7.app/vdj/cloneCount", valueType: "Int",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Number of Clones"}
 				}
 			}],
