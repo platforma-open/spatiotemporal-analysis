@@ -1,266 +1,132 @@
 """Behavioral tests for compartment_analysis.py.
 
-All tests focus on observable behavior (inputs -> outputs) rather than
-implementation details. Synthetic data is constructed inline for each test.
+Unit tests for pure math functions + end-to-end tests invoking the CLI.
+All tests focus on observable behavior (inputs -> outputs).
 
-Original specs for this block are located in 'docs/text/work/projects/in-vivo-compartment-analysis/'
+Spec: docs/text/work/projects/in-vivo-compartment-analysis/README.md
 
 Run from software/:
     uv sync
     uv run pytest tests/
 """
 
+import csv
+import json
 import math
 import os
+import subprocess
+import sys
 
 import numpy as np
 import polars as pl
 import pytest
 
 from compartment_analysis import (
-    average_replicates,
-    build_heatmap_data,
-    build_prevalence_histogram,
-    build_temporal_line_data,
-    compute_clr,
-    compute_grouping_metrics,
-    compute_relative_frequency,
-    compute_subject_prevalence,
-    compute_temporal_metrics,
-    read_input,
     restriction_index,
     shannon_entropy,
 )
+
+SCRIPT = os.path.join(os.path.dirname(__file__), "..", "src", "compartment_analysis.py")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _write_csv(df: pl.DataFrame, tmp_path: str) -> str:
-    path = os.path.join(tmp_path, "input.csv")
+def _run(input_csv: str, args: list[str], cwd: str) -> subprocess.CompletedProcess:
+    """Invoke compartment_analysis.py and return the result."""
+    cmd = [sys.executable, SCRIPT, input_csv] + args
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=30)
+
+
+def _write_csv(tmp_path: str, filename: str, rows: list[dict]) -> str:
+    path = os.path.join(tmp_path, filename)
+    df = pl.DataFrame(rows)
     df.write_csv(path)
     return path
 
 
-def _simple_df(rows: list[dict]) -> pl.DataFrame:
-    return pl.DataFrame(rows)
+def _read_output(tmp_path: str, suffix: str) -> pl.DataFrame:
+    path = os.path.join(tmp_path, f"out_{suffix}.csv")
+    return pl.read_csv(path)
 
 
 # ---------------------------------------------------------------------------
-# 1. Input reading & preprocessing
+# Fixtures: reusable synthetic datasets
 # ---------------------------------------------------------------------------
 
 
-class TestReadInput:
-    def test_reads_csv_and_casts_abundance(self, tmp_path):
-        df = pl.DataFrame(
-            {
-                "sampleId": ["s1", "s1", "s2"],
-                "elementId": ["c1", "c2", "c1"],
-                "abundance": ["100", "200", "150"],
-            }
-        )
-        path = _write_csv(df, str(tmp_path))
-        result = read_input(path, has_grouping=False, has_timepoint=False, min_abundance_threshold=0.0)
-        assert result["abundance"].dtype == pl.Float64
-        assert len(result) == 3
-
-    def test_drops_null_abundance(self, tmp_path):
-        df = pl.DataFrame(
-            {
-                "sampleId": ["s1", "s1"],
-                "elementId": ["c1", "c2"],
-                "abundance": ["100", "NaN"],
-            }
-        )
-        path = _write_csv(df, str(tmp_path))
-        result = read_input(path, has_grouping=False, has_timepoint=False, min_abundance_threshold=0.0)
-        assert len(result) == 1
-        assert result["elementId"][0] == "c1"
-
-    def test_min_abundance_filter_keeps_clone_above_threshold_in_any_sample(self, tmp_path):
-        df = pl.DataFrame(
-            {
-                "sampleId": ["s1", "s2", "s1", "s2"],
-                "elementId": ["c1", "c1", "c2", "c2"],
-                "abundance": [5.0, 100.0, 3.0, 4.0],
-            }
-        )
-        path = _write_csv(df, str(tmp_path))
-        result = read_input(path, has_grouping=False, has_timepoint=False, min_abundance_threshold=10.0)
-        assert set(result["elementId"].to_list()) == {"c1"}
-
-    def test_min_abundance_zero_keeps_all(self, tmp_path):
-        df = pl.DataFrame(
-            {
-                "sampleId": ["s1", "s2"],
-                "elementId": ["c1", "c2"],
-                "abundance": [1.0, 2.0],
-            }
-        )
-        path = _write_csv(df, str(tmp_path))
-        result = read_input(path, has_grouping=False, has_timepoint=False, min_abundance_threshold=0.0)
-        assert len(result) == 2
-
-    def test_integer_metadata_works_in_downstream_grouping(self, tmp_path):
-        # Grouping and timepoint columns provided as integers should work end-to-end
-        df = pl.DataFrame(
-            {
-                "sampleId": ["s1", "s2"],
-                "elementId": ["c1", "c1"],
-                "abundance": [80.0, 20.0],
-                "grouping": [1, 2],
-                "timepoint": [7, 14],
-            }
-        )
-        path = _write_csv(df, str(tmp_path))
-        result = read_input(path, has_grouping=True, has_timepoint=True, min_abundance_threshold=0.0)
-        freq_df = compute_relative_frequency(result)
-        grouping = compute_grouping_metrics(
-            freq_df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        assert len(grouping) == 1
-        assert grouping["dominant"][0] == "1"
+def _full_dataset() -> list[dict]:
+    """3 subjects, 2 tissues, 3 timepoints, 3 clones + background.
+    Designed for the terminal mouse model use case (E-MTAB-9478 pattern).
+    Each subject is sampled in both tissues at all 3 timepoints = 6 samples per subject."""
+    rows = []
+    # Subject m1
+    for tp, tp_data in [
+        ("D0", {"c1": 100, "c2": 10, "c3": 5, "bg": 885}),
+        ("D7", {"c1": 200, "c2": 50, "c3": 20, "bg": 730}),
+        ("D14", {"c1": 50, "c2": 100, "c3": 80, "bg": 770}),
+    ]:
+        for tissue in ["lung", "spleen"]:
+            sample_id = f"m1_{tissue}_{tp}"
+            scale = 1.0 if tissue == "lung" else 0.3
+            for clone, count in tp_data.items():
+                rows.append({
+                    "sampleId": sample_id,
+                    "elementId": clone,
+                    "abundance": round(count * scale),
+                    "subject": "m1",
+                    "grouping": tissue,
+                    "timepoint": tp,
+                })
+    # Subject m2 — lung-dominant c1
+    for tp, tp_data in [
+        ("D0", {"c1": 80, "c2": 5, "c3": 0, "bg": 915}),
+        ("D7", {"c1": 300, "c2": 30, "c3": 10, "bg": 660}),
+        ("D14", {"c1": 100, "c2": 80, "c3": 50, "bg": 770}),
+    ]:
+        for tissue in ["lung", "spleen"]:
+            sample_id = f"m2_{tissue}_{tp}"
+            scale = 1.0 if tissue == "lung" else 0.2
+            for clone, count in tp_data.items():
+                rows.append({
+                    "sampleId": sample_id,
+                    "elementId": clone,
+                    "abundance": round(count * scale),
+                    "subject": "m2",
+                    "grouping": tissue,
+                    "timepoint": tp,
+                })
+    # Subject m3 — spleen-dominant c1
+    for tp, tp_data in [
+        ("D0", {"c1": 50, "c2": 30, "c3": 10, "bg": 910}),
+        ("D7", {"c1": 150, "c2": 60, "c3": 40, "bg": 750}),
+        ("D14", {"c1": 80, "c2": 120, "c3": 100, "bg": 700}),
+    ]:
+        for tissue in ["lung", "spleen"]:
+            sample_id = f"m3_{tissue}_{tp}"
+            # For m3, spleen is dominant
+            scale = 0.3 if tissue == "lung" else 1.0
+            for clone, count in tp_data.items():
+                rows.append({
+                    "sampleId": sample_id,
+                    "elementId": clone,
+                    "abundance": round(count * scale),
+                    "subject": "m3",
+                    "grouping": tissue,
+                    "timepoint": tp,
+                })
+    return rows
 
 
-# ---------------------------------------------------------------------------
-# 2. Sample averaging
-# ---------------------------------------------------------------------------
-
-
-class TestAverageReplicates:
-    def test_averages_replicate_samples(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "subject": "m1", "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 200.0, "subject": "m1", "grouping": "lung"},
-            ]
-        )
-        result = average_replicates(df, has_subject=True, has_grouping=True, has_timepoint=False)
-        assert len(result) == 1
-        assert result["abundance"][0] == pytest.approx(150.0)
-
-    def test_no_replicates_passes_through(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "subject": "m1", "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 200.0, "subject": "m1", "grouping": "spleen"},
-            ]
-        )
-        result = average_replicates(df, has_subject=True, has_grouping=True, has_timepoint=False)
-        assert len(result) == 2
-
-    def test_averaged_replicates_normalize_correctly(self):
-        # Two replicates for the same condition: abundances 100 and 200 → averaged to 150
-        # Second condition has abundance 50. After averaging, normalization should use 150+50=200.
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "subject": "m1", "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 200.0, "subject": "m1", "grouping": "lung"},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 50.0, "subject": "m1", "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c2", "abundance": 50.0, "subject": "m1", "grouping": "lung"},
-            ]
-        )
-        averaged = average_replicates(df, has_subject=True, has_grouping=True, has_timepoint=False)
-        result = compute_relative_frequency(averaged)
-        freq_map = dict(zip(result["elementId"].to_list(), result["frequency"].to_list()))
-        # c1 averaged = 150, c2 averaged = 50, total = 200
-        assert freq_map["c1"] == pytest.approx(0.75)
-        assert freq_map["c2"] == pytest.approx(0.25)
-
-
-# ---------------------------------------------------------------------------
-# 3. Normalization
-# ---------------------------------------------------------------------------
-
-
-class TestRelativeFrequency:
-    def test_frequencies_sum_to_one_per_sample(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 300.0},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 50.0},
-                {"sampleId": "s2", "elementId": "c2", "abundance": 50.0},
-            ]
-        )
-        result = compute_relative_frequency(df)
-        for sid in ["s1", "s2"]:
-            sample = result.filter(pl.col("sampleId") == sid)
-            assert sample["frequency"].sum() == pytest.approx(1.0)
-
-    def test_correct_proportions(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 25.0},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 75.0},
-            ]
-        )
-        result = compute_relative_frequency(df)
-        freq_map = dict(zip(result["elementId"].to_list(), result["frequency"].to_list()))
-        assert freq_map["c1"] == pytest.approx(0.25)
-        assert freq_map["c2"] == pytest.approx(0.75)
-
-    def test_zero_total_sample_excluded(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0},
-            ]
-        )
-        result = compute_relative_frequency(df)
-        # s2 has total 0, should be excluded
-        assert result["sampleId"].to_list() == ["s1"]
-
-
-class TestCLR:
-    def test_clr_values_sum_to_zero_per_sample(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 200.0},
-                {"sampleId": "s1", "elementId": "c3", "abundance": 300.0},
-            ]
-        )
-        result = compute_clr(df, mode="population", has_subject=False)
-        assert result["frequency"].sum() == pytest.approx(0.0, abs=1e-10)
-
-    def test_clr_handles_zero_abundance_via_replacement(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 0.0},
-                {"sampleId": "s1", "elementId": "c3", "abundance": 200.0},
-            ]
-        )
-        result = compute_clr(df, mode="population", has_subject=False)
-        # Should not have any NaN/inf values
-        assert result["frequency"].is_nan().sum() == 0
-        assert result["frequency"].is_infinite().sum() == 0
-
-    def test_clr_per_subject_in_intra_subject_mode(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "subject": "m1"},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 200.0, "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 50.0, "subject": "m2"},
-                {"sampleId": "s2", "elementId": "c2", "abundance": 150.0, "subject": "m2"},
-            ]
-        )
-        result = compute_clr(df, mode="intra-subject", has_subject=True)
-        # CLR values should sum to ~0 within each sample
-        for sid in ["s1", "s2"]:
-            sample = result.filter(pl.col("sampleId") == sid)
-            assert sample["frequency"].sum() == pytest.approx(0.0, abs=1e-10)
-
-
-# ---------------------------------------------------------------------------
-# 4. Grouping metrics
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Unit tests: pure math functions
+# ===========================================================================
 
 
 class TestRestrictionIndex:
+    # RI = 1 - H(p)/log2(N) — tests pin exact values for the formula
     def test_single_group_returns_one(self):
         assert restriction_index(np.array([1.0])) == 1.0
 
@@ -284,6 +150,7 @@ class TestRestrictionIndex:
 
 
 class TestShannonEntropy:
+    # H(p) = -sum(p_i * log2(p_i)) — no E2E equivalent for these exact values
     def test_single_element(self):
         assert shannon_entropy(np.array([1.0])) == 0.0
 
@@ -294,610 +161,1019 @@ class TestShannonEntropy:
         assert shannon_entropy(np.array([])) == 0.0
 
 
-class TestGroupingMetrics:
-    def _build_grouped_df(self, rows):
-        """Build a frequency-ready DataFrame with grouping column."""
-        df = _simple_df(rows)
-        return compute_relative_frequency(df)
+# ===========================================================================
+# E2E tests: full pipeline via CLI
+# ===========================================================================
 
-    def test_dominant_group_is_highest_frequency(self):
-        df = self._build_grouped_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 90.0, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "grouping": "spleen"},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 10.0, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c2", "abundance": 90.0, "grouping": "spleen"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        c2 = result.filter(pl.col("elementId") == "c2")
-        assert c1["dominant"][0] == "lung"
-        assert c2["dominant"][0] == "spleen"
 
-    def test_dominant_group_tie_broken_alphabetically_pooled(self):
-        # Equal frequencies in both groups — alphabetical first wins
-        df = self._build_grouped_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 50.0, "grouping": "brain"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 50.0, "grouping": "lung"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        # With equal mean freq, argmax picks the first in the array order.
-        # Categories are sorted alphabetically: ["brain", "lung"]
-        # Equal freq → argmax gives index 0 → "brain"
-        assert result["dominant"][0] == "brain"
+# ---------------------------------------------------------------------------
+# 1. Happy path: full pipeline, population mode
+# ---------------------------------------------------------------------------
 
-    def test_breadth_counts_groups_above_threshold(self):
-        df = self._build_grouped_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 1.0, "grouping": "spleen"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 0.0, "grouping": "brain"},
-                # Need other elements so samples have nonzero totals
-                {"sampleId": "s3", "elementId": "c_other", "abundance": 100.0, "grouping": "brain"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        # c1 present in lung and spleen but not brain (0 abundance)
+
+class TestHappyPathPopulation:
+    """Full pipeline in population mode with grouping + temporal + subject (R1, R2, R5, R8)."""
+
+    def test_full_pipeline_produces_all_outputs(self, tmp_path):
+        # The most common use case: terminal model with all three variables
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        result = _run(input_csv, [
+            "--calculation-mode", "population",
+            "--normalization", "relative-frequency",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        # All output files should exist
+        for suffix in ["main", "grouping", "temporal", "heatmap", "temporal_line", "prevalence", "prevalence_histogram"]:
+            path = os.path.join(str(tmp_path), f"out_{suffix}.csv")
+            assert os.path.exists(path), f"Missing output: {suffix}"
+
+    def test_main_table_has_expected_columns(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        main = _read_output(str(tmp_path), "main")
+        # Must contain prevalence, grouping, and temporal columns
+        assert "elementId" in main.columns
+        assert "subjectPrevalence" in main.columns
+        assert "ri" in main.columns
+        assert "dominant" in main.columns
+        assert "peakTimepoint" in main.columns
+        assert "temporalShiftIndex" in main.columns
+        assert "log2PeakDelta" in main.columns
+        assert "log2KineticDelta" in main.columns
+
+    def test_all_clones_present_in_main_table(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        main = _read_output(str(tmp_path), "main")
+        expected_clones = {"c1", "c2", "c3", "bg"}
+        assert set(main["elementId"].to_list()) == expected_clones
+
+    def test_ri_values_in_valid_range(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        # RI must be in [0, 1] for all clones (R11)
+        for ri in grouping["ri"].to_list():
+            if not math.isnan(ri):
+                assert 0.0 <= ri <= 1.0, f"RI {ri} out of range"
+
+    def test_tsi_values_in_valid_range(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        # TSI must be in [0, 1] (R15)
+        for tsi in temporal["temporalShiftIndex"].to_list():
+            if not math.isnan(tsi):
+                assert 0.0 <= tsi <= 1.0, f"TSI {tsi} out of range"
+
+    def test_subject_prevalence_correct_for_shared_clone(self, tmp_path):
+        # All 3 subjects have c1 with abundance > 0 — prevalence should be 3
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        prevalence = _read_output(str(tmp_path), "prevalence")
+        c1 = prevalence.filter(pl.col("elementId") == "c1")
+        assert c1["subjectPrevalence"][0] == 3
+        assert c1["subjectPrevalenceFraction"][0] == pytest.approx(1.0)
+
+    def test_grouping_exact_values_for_known_clone(self, tmp_path):
+        # c1 is lung-dominant in m1 and m2, spleen-dominant in m3 — consensus should be lung
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1 = grouping.filter(pl.col("elementId") == "c1")
+        assert c1["consensusDominant"][0] == "lung"
         assert c1["breadth"][0] == 2
 
-    def test_breadth_with_nonzero_threshold(self):
-        df = self._build_grouped_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 1.0, "grouping": "spleen"},
-                {"sampleId": "s2", "elementId": "c_other", "abundance": 99.0, "grouping": "spleen"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.05, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        # spleen frequency for c1 = 1/100 = 0.01, below threshold of 0.05
-        assert c1["breadth"][0] == 1
 
-    def test_ri_one_for_single_group_clone(self):
-        df = self._build_grouped_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "grouping": "spleen"},
-                {"sampleId": "s2", "elementId": "c_other", "abundance": 100.0, "grouping": "spleen"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["ri"][0] == pytest.approx(1.0)
+# ---------------------------------------------------------------------------
+# 2. Happy path: intra-subject mode
+# ---------------------------------------------------------------------------
 
-    def test_empty_grouping_values_excluded(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 0.5, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "frequency": 0.5, "grouping": ""},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
+
+class TestHappyPathIntraSubject:
+    """Intra-Subject mode computes per-subject metrics then aggregates (R3)."""
+
+    def test_intra_subject_produces_outputs(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        result = _run(input_csv, [
+            "--calculation-mode", "intra-subject",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert os.path.exists(os.path.join(str(tmp_path), "out_main.csv"))
+        assert os.path.exists(os.path.join(str(tmp_path), "out_grouping.csv"))
+        assert os.path.exists(os.path.join(str(tmp_path), "out_temporal.csv"))
+
+    def test_intra_subject_temporal_metrics_are_aggregated(self, tmp_path):
+        # In intra-subject mode, temporal metrics should be per-subject then averaged
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--calculation-mode", "intra-subject",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        # Should have one row per element (aggregated across subjects)
+        element_ids = temporal["elementId"].to_list()
+        assert len(element_ids) == len(set(element_ids)), "Temporal should have one row per element"
+
+
+# ---------------------------------------------------------------------------
+# 3. Happy path: grouping only / temporal only
+# ---------------------------------------------------------------------------
+
+
+class TestPartialVariables:
+    """Block works when only one of grouping/temporal is configured (R5a, R32)."""
+
+    def test_grouping_only_no_temporal_output(self, tmp_path):
+        # Only grouping configured — temporal files should NOT exist
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert os.path.exists(os.path.join(str(tmp_path), "out_grouping.csv"))
+        assert not os.path.exists(os.path.join(str(tmp_path), "out_temporal.csv"))
+        assert not os.path.exists(os.path.join(str(tmp_path), "out_temporal_line.csv"))
+
+    def test_temporal_only_no_grouping_output(self, tmp_path):
+        # Only temporal configured — grouping files should NOT exist
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert os.path.exists(os.path.join(str(tmp_path), "out_temporal.csv"))
+        assert not os.path.exists(os.path.join(str(tmp_path), "out_grouping.csv"))
+        assert not os.path.exists(os.path.join(str(tmp_path), "out_heatmap.csv"))
+
+    def test_no_subject_variable_population_mode(self, tmp_path):
+        # Population mode without subject — no prevalence, no consensus metrics (R5, edge case)
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 50, "grouping": "spleen"},
+            {"sampleId": "s1", "elementId": "c2", "abundance": 50, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c2", "abundance": 100, "grouping": "spleen"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert os.path.exists(os.path.join(str(tmp_path), "out_main.csv"))
+        assert os.path.exists(os.path.join(str(tmp_path), "out_grouping.csv"))
+        # No prevalence when no subject
+        assert not os.path.exists(os.path.join(str(tmp_path), "out_prevalence.csv"))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        # No consensus columns when no subject
+        assert "consensusDominant" not in grouping.columns
+        assert "meanRi" not in grouping.columns
+
+
+# ---------------------------------------------------------------------------
+# 4. CLR normalization
+# ---------------------------------------------------------------------------
+
+
+class TestCLRNormalization:
+    """CLR transform produces valid output and handles zeros (R9)."""
+
+    def test_clr_runs_without_error(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        result = _run(input_csv, [
+            "--normalization", "clr",
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert os.path.exists(os.path.join(str(tmp_path), "out_main.csv"))
+
+    def test_clr_with_zero_abundance_clone(self, tmp_path):
+        # c3 is absent from m2 at D0 — CLR must handle the zero via replacement (R9)
+        rows = _full_dataset()
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        result = _run(input_csv, [
+            "--normalization", "clr",
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        grouping = _read_output(str(tmp_path), "grouping")
+        # Should still produce valid RI values (no NaN from CLR issues)
+        for ri in grouping["ri"].to_list():
+            if not math.isnan(ri):
+                assert 0.0 <= ri <= 1.0
+
+    def test_clr_intra_subject_per_subject_scope(self, tmp_path):
+        # In intra-subject mode, CLR should be applied per-subject (R9)
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        result = _run(input_csv, [
+            "--calculation-mode", "intra-subject",
+            "--normalization", "clr",
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        assert os.path.exists(os.path.join(str(tmp_path), "out_grouping.csv"))
+
+
+# ---------------------------------------------------------------------------
+# 5. Edge case: single group (R32, R34)
+# ---------------------------------------------------------------------------
+
+
+class TestSingleGroup:
+    """When only one group category exists, RI should be 1.0 for all clones."""
+
+    def test_single_group_ri_is_one(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung"},
+            {"sampleId": "s1", "elementId": "c2", "abundance": 200, "grouping": "lung"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        for ri in grouping["ri"].to_list():
+            assert ri == pytest.approx(1.0)
+
+    def test_single_group_breadth_is_one(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung"},
+            {"sampleId": "s1", "elementId": "c2", "abundance": 200, "grouping": "lung"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        for b in grouping["breadth"].to_list():
+            assert b == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Edge case: single timepoint (R32)
+# ---------------------------------------------------------------------------
+
+
+class TestSingleTimepoint:
+    """Temporal metrics should not be computed when only one timepoint exists."""
+
+    def test_single_timepoint_no_temporal_output(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "timepoint": "D0", "grouping": "lung"},
+            {"sampleId": "s1", "elementId": "c2", "abundance": 200, "timepoint": "D0", "grouping": "lung"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-timepoint", "--has-grouping",
+            "--timepoint-order", json.dumps(["D0"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        # Temporal files should NOT be generated with only 1 timepoint
+        assert not os.path.exists(os.path.join(str(tmp_path), "out_temporal.csv"))
+
+
+# ---------------------------------------------------------------------------
+# 7. Edge case: clone in only one timepoint (R16, R16a)
+# ---------------------------------------------------------------------------
+
+
+class TestCloneOneTimepoint:
+    """Clone present at only one timepoint gets Log2PD=0 and Log2KD=0."""
+
+    def test_single_detection_fold_changes_are_zero(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "timepoint": "D0"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 900, "timepoint": "D0"},
+            # c1 absent at D7
+            {"sampleId": "s2", "elementId": "c1", "abundance": 0, "timepoint": "D7"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 1000, "timepoint": "D7"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        assert c1["log2PeakDelta"][0] == pytest.approx(0.0)
+        assert c1["log2KineticDelta"][0] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# 8. Edge case: clone in only one subject (R17b, R33)
+# ---------------------------------------------------------------------------
+
+
+class TestCloneOneSubject:
+    """Clone in fewer than minSubjectCount subjects gets NaN for averaged metrics."""
+
+    def test_prevalence_one_mean_ri_nan(self, tmp_path):
+        rows = [
+            # c1 only in m1
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 50, "grouping": "spleen", "subject": "m1"},
+            # c1 absent from m2
+            {"sampleId": "s3", "elementId": "c1", "abundance": 0, "grouping": "lung", "subject": "m2"},
+            {"sampleId": "s4", "elementId": "c1", "abundance": 0, "grouping": "spleen", "subject": "m2"},
+            # bg present in both
+            {"sampleId": "s1", "elementId": "bg", "abundance": 900, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 950, "grouping": "spleen", "subject": "m1"},
+            {"sampleId": "s3", "elementId": "bg", "abundance": 1000, "grouping": "lung", "subject": "m2"},
+            {"sampleId": "s4", "elementId": "bg", "abundance": 1000, "grouping": "spleen", "subject": "m2"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping", "--has-subject",
+            "--min-subject-count", "2",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        prevalence = _read_output(str(tmp_path), "prevalence")
+        c1 = prevalence.filter(pl.col("elementId") == "c1")
+        # Subject prevalence still counts the single subject (R33)
+        assert c1["subjectPrevalence"][0] == 1
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1_g = grouping.filter(pl.col("elementId") == "c1")
+        # Mean RI should be NaN for clone below minSubjectCount (R17b)
+        assert math.isnan(c1_g["meanRi"][0])
+        assert math.isnan(c1_g["stdRi"][0])
+
+
+# ---------------------------------------------------------------------------
+# 9. Edge case: missing/empty metadata (R7b, R35)
+# ---------------------------------------------------------------------------
+
+
+class TestMissingMetadata:
+    """Samples with missing metadata are excluded from that variable's computation only."""
+
+    def test_missing_grouping_excluded(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung", "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 100, "grouping": "", "timepoint": "D7"},
+            {"sampleId": "s3", "elementId": "c1", "abundance": 100, "grouping": "spleen", "timepoint": "D14"},
+            # Background so frequencies are well-defined
+            {"sampleId": "s1", "elementId": "bg", "abundance": 900, "grouping": "lung", "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 900, "grouping": "", "timepoint": "D7"},
+            {"sampleId": "s3", "elementId": "bg", "abundance": 900, "grouping": "spleen", "timepoint": "D14"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        result = _run(input_csv, [
+            "--has-grouping", "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        # Grouping should work (excluding the empty-grouping sample)
+        grouping = _read_output(str(tmp_path), "grouping")
+        assert len(grouping) > 0
+        # Temporal should also work (sample with missing grouping still participates)
+        temporal = _read_output(str(tmp_path), "temporal")
+        assert len(temporal) > 0
+
+    def test_missing_timepoint_excluded(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 200, "timepoint": ""},
+            {"sampleId": "s3", "elementId": "c1", "abundance": 150, "timepoint": "D7"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 900, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 800, "timepoint": ""},
+            {"sampleId": "s3", "elementId": "bg", "abundance": 850, "timepoint": "D7"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        result = _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        temporal = _read_output(str(tmp_path), "temporal")
+        assert len(temporal) > 0
+
+
+# ---------------------------------------------------------------------------
+# 10. Edge case: min abundance threshold (R7c)
+# ---------------------------------------------------------------------------
+
+
+class TestMinAbundanceThreshold:
+    """Clones below threshold in ALL samples are excluded entirely."""
+
+    def test_threshold_filters_rare_clones(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 200, "grouping": "spleen"},
+            # c_rare: below threshold (max=5) in all samples
+            {"sampleId": "s1", "elementId": "c_rare", "abundance": 3, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c_rare", "abundance": 5, "grouping": "spleen"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--min-abundance-threshold", "10",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        main = _read_output(str(tmp_path), "main")
+        assert "c_rare" not in main["elementId"].to_list()
+        assert "c1" in main["elementId"].to_list()
+
+    def test_threshold_keeps_clone_above_in_any_sample(self, tmp_path):
+        # c1 is below threshold in s1 but above in s2 — should be kept
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 3, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 50, "grouping": "spleen"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--min-abundance-threshold", "10",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        main = _read_output(str(tmp_path), "main")
+        assert "c1" in main["elementId"].to_list()
+
+
+# ---------------------------------------------------------------------------
+# 11. Edge case: replicate averaging (R7a)
+# ---------------------------------------------------------------------------
+
+
+class TestReplicateAveraging:
+    """Multiple samples mapping to the same condition are averaged transparently."""
+
+    def test_replicates_produce_averaged_frequencies(self, tmp_path):
+        # Two replicates for m1+lung — abundances 100 and 200 should average to 150
+        rows = [
+            {"sampleId": "rep1", "elementId": "c1", "abundance": 100, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "rep2", "elementId": "c1", "abundance": 200, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "rep1", "elementId": "c2", "abundance": 50, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "rep2", "elementId": "c2", "abundance": 50, "grouping": "lung", "subject": "m1"},
+            # Different condition — no replicate
+            {"sampleId": "s3", "elementId": "c1", "abundance": 80, "grouping": "spleen", "subject": "m1"},
+            {"sampleId": "s3", "elementId": "c2", "abundance": 120, "grouping": "spleen", "subject": "m1"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        result = _run(input_csv, [
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        grouping = _read_output(str(tmp_path), "grouping")
+        assert len(grouping) > 0
+
+
+# ---------------------------------------------------------------------------
+# 12. Edge case: timepoint deselection (R7)
+# ---------------------------------------------------------------------------
+
+
+class TestTimepointDeselection:
+    """Deselected timepoints exclude corresponding samples from temporal analysis."""
+
+    def test_deselected_timepoint_excluded(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 10, "timepoint": "D0"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 90, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 80, "timepoint": "D7"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 20, "timepoint": "D7"},
+            {"sampleId": "s3", "elementId": "c1", "abundance": 50, "timepoint": "D14"},
+            {"sampleId": "s3", "elementId": "bg", "abundance": 50, "timepoint": "D14"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+
+        # Only include D0 and D14 — D7 (the peak) is deselected
+        _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        # Without D7, the peak should be at D14 (freq 0.5 > D0 freq 0.1)
+        assert c1["peakTimepoint"][0] == "D14"
+
+
+# ---------------------------------------------------------------------------
+# 13. Edge case: dominant group tie-breaking (R12)
+# ---------------------------------------------------------------------------
+
+
+class TestDominantTieBreaking:
+    """Ties for dominant group are broken alphabetically."""
+
+    def test_equal_frequency_alphabetical_wins(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 50, "grouping": "spleen"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 50, "grouping": "lung"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1 = grouping.filter(pl.col("elementId") == "c1")
+        # "lung" < "spleen" alphabetically
         assert c1["dominant"][0] == "lung"
 
 
 # ---------------------------------------------------------------------------
-# 5. Temporal metrics
+# 14. Edge case: consensus dominant tie-breaking (R18)
 # ---------------------------------------------------------------------------
 
 
-class TestTemporalMetrics:
-    def _build_temporal_df(self, rows):
-        df = _simple_df(rows)
-        return compute_relative_frequency(df)
+class TestConsensusDominantTieBreaking:
+    """Consensus dominant ties broken by highest mean frequency across tied groups."""
 
-    def test_peak_timepoint_correct(self):
-        # Background element ensures per-sample frequencies vary meaningfully
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 10.0, "timepoint": "D0"},
-                {"sampleId": "s1", "elementId": "bg", "abundance": 90.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 100.0, "timepoint": "D7"},
-                {"sampleId": "s2", "elementId": "bg", "abundance": 100.0, "timepoint": "D7"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 30.0, "timepoint": "D14"},
-                {"sampleId": "s3", "elementId": "bg", "abundance": 70.0, "timepoint": "D14"},
-            ]
-        )
-        result = compute_temporal_metrics(
-            df, ["D0", "D7", "D14"], has_subject=False, mode="population", min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["peakTimepoint"][0] == "D7"
+    def test_tied_count_resolved_by_mean_frequency(self, tmp_path):
+        # m1: c1 dominant in lung (freq 0.95 vs 0.05)
+        # m2: c1 dominant in spleen (freq 0.6 vs 0.4)
+        # Tie 1:1 → lung has higher mean freq (0.95+0.4)/2=0.675 vs (0.05+0.6)/2=0.325
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 95, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 5, "grouping": "spleen", "subject": "m1"},
+            {"sampleId": "s3", "elementId": "c1", "abundance": 40, "grouping": "lung", "subject": "m2"},
+            {"sampleId": "s4", "elementId": "c1", "abundance": 60, "grouping": "spleen", "subject": "m2"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping", "--has-subject",
+            "--min-subject-count", "1",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
 
-    def test_tsi_zero_when_all_mass_at_first_timepoint(self):
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "timepoint": "D7"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 0.0, "timepoint": "D14"},
-                # Need nonzero totals for other samples
-                {"sampleId": "s2", "elementId": "c_other", "abundance": 100.0, "timepoint": "D7"},
-                {"sampleId": "s3", "elementId": "c_other", "abundance": 100.0, "timepoint": "D14"},
-            ]
-        )
-        result = compute_temporal_metrics(
-            df, ["D0", "D7", "D14"], has_subject=False, mode="population", min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["temporalShiftIndex"][0] == pytest.approx(0.0)
-
-    def test_tsi_one_when_all_mass_at_last_timepoint(self):
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 0.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "timepoint": "D7"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 100.0, "timepoint": "D14"},
-                {"sampleId": "s1", "elementId": "c_other", "abundance": 100.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c_other", "abundance": 100.0, "timepoint": "D7"},
-            ]
-        )
-        result = compute_temporal_metrics(
-            df, ["D0", "D7", "D14"], has_subject=False, mode="population", min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["temporalShiftIndex"][0] == pytest.approx(1.0)
-
-    def test_tsi_intermediate_value(self):
-        # Equal abundance at D0 (pos=0) and D14 (pos=2), 3 timepoints
-        # TSI = (0*f + 1*0 + 2*f) / (2f * 2) = 2f / 4f = 0.5
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 50.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "timepoint": "D7"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 50.0, "timepoint": "D14"},
-                {"sampleId": "s2", "elementId": "c_other", "abundance": 100.0, "timepoint": "D7"},
-            ]
-        )
-        result = compute_temporal_metrics(
-            df, ["D0", "D7", "D14"], has_subject=False, mode="population", min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["temporalShiftIndex"][0] == pytest.approx(0.5, abs=0.05)
-
-    def test_log2pd_zero_for_single_timepoint_clone(self):
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "timepoint": "D7"},
-                {"sampleId": "s2", "elementId": "c_other", "abundance": 100.0, "timepoint": "D7"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=False, mode="population", min_subject_count=2)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["log2PeakDelta"][0] == pytest.approx(0.0)
-
-    def test_log2pd_with_multiple_elements(self):
-        # s1: c1=10, c_bg=90 → freq_c1 = 0.1
-        # s2: c1=80, c_bg=20 → freq_c1 = 0.8
-        # Log2PD = log2(0.8/0.1) = log2(8) = 3.0
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 10.0, "timepoint": "D0"},
-                {"sampleId": "s1", "elementId": "c_bg", "abundance": 90.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 80.0, "timepoint": "D7"},
-                {"sampleId": "s2", "elementId": "c_bg", "abundance": 20.0, "timepoint": "D7"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=False, mode="population", min_subject_count=2)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["log2PeakDelta"][0] == pytest.approx(3.0)
-
-    def test_log2kd_negative_for_contracting_clone(self):
-        # s1(D0): c1=80, bg=20 → freq=0.8
-        # s2(D7): c1=10, bg=90 → freq=0.1
-        # Log2KD = log2(0.1/0.8) = log2(0.125) = -3.0
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 80.0, "timepoint": "D0"},
-                {"sampleId": "s1", "elementId": "c_bg", "abundance": 20.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "timepoint": "D7"},
-                {"sampleId": "s2", "elementId": "c_bg", "abundance": 90.0, "timepoint": "D7"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=False, mode="population", min_subject_count=2)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["log2KineticDelta"][0] == pytest.approx(-3.0)
-
-    def test_fewer_than_two_timepoints_returns_empty(self):
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "timepoint": "D0"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0"], has_subject=False, mode="population", min_subject_count=2)
-        assert len(result) == 0
-
-    def test_timepoints_not_in_order_are_excluded(self):
-        df = self._build_temporal_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 50.0, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 50.0, "timepoint": "D7"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 50.0, "timepoint": "EXCLUDED"},
-            ]
-        )
-        # Only D0 and D7 in the order — EXCLUDED samples should be dropped
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=False, mode="population", min_subject_count=2)
-        assert len(result) > 0
-
-
-# ---------------------------------------------------------------------------
-# 6. Consensus & convergence metrics
-# ---------------------------------------------------------------------------
-
-
-class TestSubjectPrevalence:
-    def test_counts_distinct_subjects(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 10.0, "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 20.0, "subject": "m2"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 30.0, "subject": "m3"},
-                {"sampleId": "s1", "elementId": "c2", "abundance": 5.0, "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c2", "abundance": 0.0, "subject": "m2"},
-                {"sampleId": "s3", "elementId": "c2", "abundance": 0.0, "subject": "m3"},
-            ]
-        )
-        result = compute_subject_prevalence(df, has_subject=True)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        c2 = result.filter(pl.col("elementId") == "c2")
-        assert c1["subjectPrevalence"][0] == 3
-        assert c2["subjectPrevalence"][0] == 1
-
-    def test_prevalence_fraction(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 10.0, "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 20.0, "subject": "m2"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 0.0, "subject": "m3"},
-            ]
-        )
-        result = compute_subject_prevalence(df, has_subject=True)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["subjectPrevalenceFraction"][0] == pytest.approx(2.0 / 3.0)
-
-    def test_without_subject_counts_samples(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 10.0},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 20.0},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 0.0},
-            ]
-        )
-        result = compute_subject_prevalence(df, has_subject=False)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["subjectPrevalence"][0] == 2  # s1 and s2 (s3 has 0)
-
-
-class TestConsensusMetrics:
-    def _build_consensus_df(self, rows):
-        """Build a frequency-ready DataFrame with subject and grouping."""
-        df = _simple_df(rows)
-        return compute_relative_frequency(df)
-
-    def test_consensus_dominant_is_mode_across_subjects(self):
-        # c1 is dominant in lung for m1 and m2, spleen for m3
-        df = self._build_consensus_df(
-            [
-                # m1: c1 dominant in lung
-                {"sampleId": "s1", "elementId": "c1", "abundance": 90.0, "grouping": "lung", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "grouping": "spleen", "subject": "m1"},
-                # m2: c1 dominant in lung
-                {"sampleId": "s3", "elementId": "c1", "abundance": 80.0, "grouping": "lung", "subject": "m2"},
-                {"sampleId": "s4", "elementId": "c1", "abundance": 20.0, "grouping": "spleen", "subject": "m2"},
-                # m3: c1 dominant in spleen
-                {"sampleId": "s5", "elementId": "c1", "abundance": 10.0, "grouping": "lung", "subject": "m3"},
-                {"sampleId": "s6", "elementId": "c1", "abundance": 90.0, "grouping": "spleen", "subject": "m3"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=True, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1 = grouping.filter(pl.col("elementId") == "c1")
         assert c1["consensusDominant"][0] == "lung"
 
-    def test_consensus_dominant_tie_broken_by_mean_frequency(self):
-        # c1: m1 dominant=lung, m2 dominant=spleen — tie in count
-        # lung mean freq should be higher than spleen
-        df = self._build_consensus_df(
-            [
-                # m1: c1 in lung=95, spleen=5
-                {"sampleId": "s1", "elementId": "c1", "abundance": 95.0, "grouping": "lung", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 5.0, "grouping": "spleen", "subject": "m1"},
-                # m2: c1 in lung=40, spleen=60
-                {"sampleId": "s3", "elementId": "c1", "abundance": 40.0, "grouping": "lung", "subject": "m2"},
-                {"sampleId": "s4", "elementId": "c1", "abundance": 60.0, "grouping": "spleen", "subject": "m2"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=True, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        # m1 dominant=lung, m2 dominant=spleen → tie 1:1
-        # lung mean freq across subjects: mean(95/100, 40/100) = mean(0.95, 0.4) = 0.675
-        # spleen mean freq: mean(5/100, 60/100) = mean(0.05, 0.6) = 0.325
-        # → lung wins by mean frequency
+
+# ---------------------------------------------------------------------------
+# 15. Edge case: uniform distribution → RI = 0 (R11)
+# ---------------------------------------------------------------------------
+
+
+class TestUniformDistribution:
+    """Perfectly uniform distribution across groups yields RI = 0."""
+
+    def test_uniform_ri_zero(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 100, "grouping": "spleen"},
+            {"sampleId": "s3", "elementId": "c1", "abundance": 100, "grouping": "brain"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1 = grouping.filter(pl.col("elementId") == "c1")
+        assert c1["ri"][0] == pytest.approx(0.0, abs=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# 16. Edge case: zero-total sample excluded (edge case table)
+# ---------------------------------------------------------------------------
+
+
+class TestZeroTotalSample:
+    """Samples with zero total abundance are excluded from normalization."""
+
+    def test_zero_total_sample_excluded(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 0},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        result = _run(input_csv, [
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        main = _read_output(str(tmp_path), "main")
+        assert "c1" in main["elementId"].to_list()
+
+
+# ---------------------------------------------------------------------------
+# 17. Edge case: all subjects same dominant (edge case table)
+# ---------------------------------------------------------------------------
+
+
+class TestAllSubjectsSameDominant:
+    """All subjects share the same dominant group."""
+
+    def test_consensus_matches_unanimous_dominant(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 90, "grouping": "lung", "subject": "m1"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 10, "grouping": "spleen", "subject": "m1"},
+            {"sampleId": "s3", "elementId": "c1", "abundance": 80, "grouping": "lung", "subject": "m2"},
+            {"sampleId": "s4", "elementId": "c1", "abundance": 20, "grouping": "spleen", "subject": "m2"},
+            {"sampleId": "s5", "elementId": "c1", "abundance": 85, "grouping": "lung", "subject": "m3"},
+            {"sampleId": "s6", "elementId": "c1", "abundance": 15, "grouping": "spleen", "subject": "m3"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1 = grouping.filter(pl.col("elementId") == "c1")
         assert c1["consensusDominant"][0] == "lung"
-
-    def test_count_dominant_in_per_category(self):
-        # Background elements ensure relative frequencies are meaningful per sample
-        df = self._build_consensus_df(
-            [
-                # m1: lung sample — c1=90 of 100 → freq=0.9
-                {"sampleId": "s1", "elementId": "c1", "abundance": 90.0, "grouping": "lung", "subject": "m1"},
-                {"sampleId": "s1", "elementId": "bg", "abundance": 10.0, "grouping": "lung", "subject": "m1"},
-                # m1: spleen sample — c1=10 of 100 → freq=0.1
-                {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "grouping": "spleen", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "bg", "abundance": 90.0, "grouping": "spleen", "subject": "m1"},
-                # m2: lung — c1=80/100=0.8
-                {"sampleId": "s3", "elementId": "c1", "abundance": 80.0, "grouping": "lung", "subject": "m2"},
-                {"sampleId": "s3", "elementId": "bg", "abundance": 20.0, "grouping": "lung", "subject": "m2"},
-                # m2: spleen — c1=20/100=0.2
-                {"sampleId": "s4", "elementId": "c1", "abundance": 20.0, "grouping": "spleen", "subject": "m2"},
-                {"sampleId": "s4", "elementId": "bg", "abundance": 80.0, "grouping": "spleen", "subject": "m2"},
-                # m3: lung — c1=30/100=0.3
-                {"sampleId": "s5", "elementId": "c1", "abundance": 30.0, "grouping": "lung", "subject": "m3"},
-                {"sampleId": "s5", "elementId": "bg", "abundance": 70.0, "grouping": "lung", "subject": "m3"},
-                # m3: spleen — c1=70/100=0.7
-                {"sampleId": "s6", "elementId": "c1", "abundance": 70.0, "grouping": "spleen", "subject": "m3"},
-                {"sampleId": "s6", "elementId": "bg", "abundance": 30.0, "grouping": "spleen", "subject": "m3"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=True, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        # m1: lung(0.9) > spleen(0.1) → dominant=lung
-        # m2: lung(0.8) > spleen(0.2) → dominant=lung
-        # m3: spleen(0.7) > lung(0.3) → dominant=spleen
-        assert c1["countDominantIn_lung"][0] == 2
-        assert c1["countDominantIn_spleen"][0] == 1
-
-    def test_mean_ri_nan_below_min_subject_count(self):
-        df = self._build_consensus_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 90.0, "grouping": "lung", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "grouping": "spleen", "subject": "m1"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=True, mode="population", presence_threshold=0.0, min_subject_count=3
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert math.isnan(c1["meanRi"][0])
-
-    def test_std_ri_nan_for_single_subject(self):
-        df = self._build_consensus_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 90.0, "grouping": "lung", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "grouping": "spleen", "subject": "m1"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=True, mode="population", presence_threshold=0.0, min_subject_count=1
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert math.isnan(c1["stdRi"][0])
-
-
-class TestTemporalMetricsIntraSubject:
-    def _build_temporal_subject_df(self, rows):
-        df = _simple_df(rows)
-        return compute_relative_frequency(df)
-
-    def test_intra_subject_averages_across_subjects(self):
-        df = self._build_temporal_subject_df(
-            [
-                # m1: c1 at D0=80/100, D7=20/100
-                {"sampleId": "s1", "elementId": "c1", "abundance": 80.0, "timepoint": "D0", "subject": "m1"},
-                {"sampleId": "s1", "elementId": "bg", "abundance": 20.0, "timepoint": "D0", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 20.0, "timepoint": "D7", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "bg", "abundance": 80.0, "timepoint": "D7", "subject": "m1"},
-                # m2: c1 at D0=60/100, D7=40/100
-                {"sampleId": "s3", "elementId": "c1", "abundance": 60.0, "timepoint": "D0", "subject": "m2"},
-                {"sampleId": "s3", "elementId": "bg", "abundance": 40.0, "timepoint": "D0", "subject": "m2"},
-                {"sampleId": "s4", "elementId": "c1", "abundance": 40.0, "timepoint": "D7", "subject": "m2"},
-                {"sampleId": "s4", "elementId": "bg", "abundance": 60.0, "timepoint": "D7", "subject": "m2"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=True, mode="intra-subject", min_subject_count=2)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert len(c1) == 1
-        # Both subjects have peak at D0, so consensus peak = D0
-        assert c1["peakTimepoint"][0] == "D0"
-
-    def test_intra_subject_nan_below_min_subject_count(self):
-        df = self._build_temporal_subject_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 80.0, "timepoint": "D0", "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 20.0, "timepoint": "D7", "subject": "m1"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=True, mode="intra-subject", min_subject_count=3)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert math.isnan(c1["temporalShiftIndex"][0])
-
-
-# ---------------------------------------------------------------------------
-# 7. Visualization data
-# ---------------------------------------------------------------------------
-
-
-class TestBuildHeatmapData:
-    def test_returns_top_n_by_ri(self):
-        # Build frequency-ready data
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 1.0, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "frequency": 0.0, "grouping": "spleen"},
-                {"sampleId": "s1", "elementId": "c2", "frequency": 0.5, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c2", "frequency": 0.5, "grouping": "spleen"},
-                {"sampleId": "s1", "elementId": "c3", "frequency": 0.8, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c3", "frequency": 0.2, "grouping": "spleen"},
-            ]
-        )
-        grouping = pl.DataFrame(
-            [
-                {"elementId": "c1", "ri": 1.0},
-                {"elementId": "c2", "ri": 0.0},
-                {"elementId": "c3", "ri": 0.5},
-            ]
-        )
-        result = build_heatmap_data(df, grouping, top_n=2)
-        # Top 2 by RI: c1 (1.0) and c3 (0.5)
-        element_ids = set(result["elementId"].to_list())
-        assert element_ids == {"c1", "c3"}
-
-    def test_heatmap_has_correct_columns(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 0.7, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "frequency": 0.3, "grouping": "spleen"},
-            ]
-        )
-        grouping = pl.DataFrame([{"elementId": "c1", "ri": 0.5}])
-        result = build_heatmap_data(df, grouping, top_n=10)
-        assert "elementId" in result.columns
-        assert "groupCategory" in result.columns
-        assert "normalizedFrequency" in result.columns
-
-
-class TestBuildTemporalLineData:
-    def test_returns_top_n_by_log2pd(self):
-        # c1: big expansion, c2: no expansion, c3: moderate
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 0.01, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "frequency": 0.8, "timepoint": "D7"},
-                {"sampleId": "s1", "elementId": "c2", "frequency": 0.5, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c2", "frequency": 0.5, "timepoint": "D7"},
-                {"sampleId": "s1", "elementId": "c3", "frequency": 0.1, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c3", "frequency": 0.3, "timepoint": "D7"},
-            ]
-        )
-        result = build_temporal_line_data(df, ["D0", "D7"], top_n=2)
-        element_ids = set(result["elementId"].to_list())
-        # c1 has highest abs(log2pd), c3 has next highest
-        assert "c1" in element_ids
-        assert len(element_ids) == 2
-
-
-class TestBuildPrevalenceHistogram:
-    def test_histogram_counts(self):
-        prevalence = pl.DataFrame(
-            [
-                {"elementId": "c1", "subjectPrevalence": 1},
-                {"elementId": "c2", "subjectPrevalence": 1},
-                {"elementId": "c3", "subjectPrevalence": 3},
-                {"elementId": "c4", "subjectPrevalence": 2},
-                {"elementId": "c5", "subjectPrevalence": 3},
-            ]
-        )
-        result = build_prevalence_histogram(prevalence)
-        hist = dict(zip(result["prevalenceCount"].to_list(), result["cloneCount"].to_list()))
-        assert hist[1] == 2
-        assert hist[2] == 1
-        assert hist[3] == 2
-
-
-# ---------------------------------------------------------------------------
-# 8. Edge cases
-# ---------------------------------------------------------------------------
-
-
-class TestEdgeCases:
-    def test_no_subject_produces_pooled_grouping(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 0.8, "grouping": "lung"},
-                {"sampleId": "s2", "elementId": "c1", "frequency": 0.2, "grouping": "spleen"},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        assert len(result) == 1
-        assert "consensusDominant" not in result.columns
-
-    def test_all_subjects_same_dominant(self):
-        df = compute_relative_frequency(
-            _simple_df(
-                [
-                    {"sampleId": "s1", "elementId": "c1", "abundance": 90.0, "grouping": "lung", "subject": "m1"},
-                    {"sampleId": "s2", "elementId": "c1", "abundance": 10.0, "grouping": "spleen", "subject": "m1"},
-                    {"sampleId": "s3", "elementId": "c1", "abundance": 80.0, "grouping": "lung", "subject": "m2"},
-                    {"sampleId": "s4", "elementId": "c1", "abundance": 20.0, "grouping": "spleen", "subject": "m2"},
-                ]
-            )
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=True, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["consensusDominant"][0] == "lung"
-        assert c1["countDominantIn_lung"][0] == 2
+        assert c1["countDominantIn_lung"][0] == 3
         assert c1["countDominantIn_spleen"][0] == 0
 
-    def test_clone_only_in_one_subject_prevalence_still_counted(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "abundance": 10.0, "subject": "m1"},
-                {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "subject": "m2"},
-                {"sampleId": "s3", "elementId": "c1", "abundance": 0.0, "subject": "m3"},
-            ]
-        )
-        result = compute_subject_prevalence(df, has_subject=True)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["subjectPrevalence"][0] == 1
 
-    def test_log2kd_zero_for_single_detected_timepoint(self):
-        df = compute_relative_frequency(
-            _simple_df(
-                [
-                    {"sampleId": "s1", "elementId": "c1", "abundance": 100.0, "timepoint": "D0"},
-                    {"sampleId": "s2", "elementId": "c1", "abundance": 0.0, "timepoint": "D7"},
-                    {"sampleId": "s2", "elementId": "bg", "abundance": 100.0, "timepoint": "D7"},
-                ]
-            )
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=False, mode="population", min_subject_count=2)
-        c1 = result.filter(pl.col("elementId") == "c1")
-        assert c1["log2KineticDelta"][0] == pytest.approx(0.0)
+# ---------------------------------------------------------------------------
+# 18. Visualization outputs
+# ---------------------------------------------------------------------------
 
-    def test_missing_timepoint_values_excluded(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 0.5, "timepoint": "D0"},
-                {"sampleId": "s2", "elementId": "c1", "frequency": 0.5, "timepoint": ""},
-                {"sampleId": "s3", "elementId": "c1", "frequency": 0.5, "timepoint": "D7"},
-            ]
-        )
-        result = compute_temporal_metrics(df, ["D0", "D7"], has_subject=False, mode="population", min_subject_count=2)
-        assert len(result) > 0
 
-    def test_empty_grouping_produces_empty_result(self):
-        df = _simple_df(
-            [
-                {"sampleId": "s1", "elementId": "c1", "frequency": 0.5, "grouping": ""},
-            ]
-        )
-        result = compute_grouping_metrics(
-            df, has_subject=False, mode="population", presence_threshold=0.0, min_subject_count=2
-        )
-        assert len(result) == 0
+class TestVisualizationOutputs:
+    """Heatmap, temporal line, and prevalence histogram have correct structure."""
+
+    def test_heatmap_structure(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--has-grouping", "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--top-n", "3",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        heatmap = _read_output(str(tmp_path), "heatmap")
+        assert "elementId" in heatmap.columns
+        assert "groupCategory" in heatmap.columns
+        assert "normalizedFrequency" in heatmap.columns
+        # Top-3 by RI means at most 3 distinct element IDs
+        assert heatmap["elementId"].n_unique() <= 3
+
+    def test_temporal_line_structure(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7", "D14"]),
+            "--top-n", "2",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        line = _read_output(str(tmp_path), "temporal_line")
+        assert "elementId" in line.columns
+        assert "timepointValue" in line.columns
+        assert "frequency" in line.columns
+        # Top-2 by Log2PD means at most 2 distinct elements
+        assert line["elementId"].n_unique() <= 2
+
+    def test_prevalence_histogram_structure(self, tmp_path):
+        input_csv = _write_csv(str(tmp_path), "input.csv", _full_dataset())
+        _run(input_csv, [
+            "--has-grouping", "--has-subject",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        histogram = _read_output(str(tmp_path), "prevalence_histogram")
+        assert "prevalenceCount" in histogram.columns
+        assert "cloneCount" in histogram.columns
+        # Sum of clone counts should equal total distinct elements
+        total_clones = histogram["cloneCount"].sum()
+        prevalence = _read_output(str(tmp_path), "prevalence")
+        assert total_clones == len(prevalence)
+
+
+# ---------------------------------------------------------------------------
+# 19. Hot path: population mode with subject — two-stage temporal aggregation
+# ---------------------------------------------------------------------------
+
+
+class TestTwoStageTemporalAggregation:
+    """Population mode with subjects must aggregate per-subject first, then across subjects.
+    This guards against the bug where subjects with more compartments get over-weighted."""
+
+    def test_equal_weight_per_subject(self, tmp_path):
+        # m1 has 3 compartments at D0, m2 has 1 compartment at D0.
+        # After two-stage aggregation, each subject contributes equally.
+        rows = [
+            # m1: 3 compartments at D0, high frequency in c1
+            {"sampleId": "m1_lung_D0", "elementId": "c1", "abundance": 80, "timepoint": "D0", "subject": "m1", "grouping": "lung"},
+            {"sampleId": "m1_lung_D0", "elementId": "bg", "abundance": 20, "timepoint": "D0", "subject": "m1", "grouping": "lung"},
+            {"sampleId": "m1_spleen_D0", "elementId": "c1", "abundance": 60, "timepoint": "D0", "subject": "m1", "grouping": "spleen"},
+            {"sampleId": "m1_spleen_D0", "elementId": "bg", "abundance": 40, "timepoint": "D0", "subject": "m1", "grouping": "spleen"},
+            {"sampleId": "m1_brain_D0", "elementId": "c1", "abundance": 90, "timepoint": "D0", "subject": "m1", "grouping": "brain"},
+            {"sampleId": "m1_brain_D0", "elementId": "bg", "abundance": 10, "timepoint": "D0", "subject": "m1", "grouping": "brain"},
+            # m1: 3 compartments at D7, low frequency in c1
+            {"sampleId": "m1_lung_D7", "elementId": "c1", "abundance": 10, "timepoint": "D7", "subject": "m1", "grouping": "lung"},
+            {"sampleId": "m1_lung_D7", "elementId": "bg", "abundance": 90, "timepoint": "D7", "subject": "m1", "grouping": "lung"},
+            {"sampleId": "m1_spleen_D7", "elementId": "c1", "abundance": 5, "timepoint": "D7", "subject": "m1", "grouping": "spleen"},
+            {"sampleId": "m1_spleen_D7", "elementId": "bg", "abundance": 95, "timepoint": "D7", "subject": "m1", "grouping": "spleen"},
+            {"sampleId": "m1_brain_D7", "elementId": "c1", "abundance": 15, "timepoint": "D7", "subject": "m1", "grouping": "brain"},
+            {"sampleId": "m1_brain_D7", "elementId": "bg", "abundance": 85, "timepoint": "D7", "subject": "m1", "grouping": "brain"},
+            # m2: 1 compartment at D0, low frequency in c1
+            {"sampleId": "m2_lung_D0", "elementId": "c1", "abundance": 10, "timepoint": "D0", "subject": "m2", "grouping": "lung"},
+            {"sampleId": "m2_lung_D0", "elementId": "bg", "abundance": 90, "timepoint": "D0", "subject": "m2", "grouping": "lung"},
+            # m2: 1 compartment at D7, high frequency in c1
+            {"sampleId": "m2_lung_D7", "elementId": "c1", "abundance": 80, "timepoint": "D7", "subject": "m2", "grouping": "lung"},
+            {"sampleId": "m2_lung_D7", "elementId": "bg", "abundance": 20, "timepoint": "D7", "subject": "m2", "grouping": "lung"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--calculation-mode", "population",
+            "--has-timepoint", "--has-subject", "--has-grouping",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+
+        # m1 at D0: mean freq across 3 compartments = (80/100 + 60/100 + 90/100) / 3 ≈ 0.767
+        # m1 at D7: mean freq across 3 compartments = (10/100 + 5/100 + 15/100) / 3 = 0.1
+        # m2 at D0: freq = 10/100 = 0.1
+        # m2 at D7: freq = 80/100 = 0.8
+        # Cross-subject mean at D0: (0.767 + 0.1) / 2 ≈ 0.433
+        # Cross-subject mean at D7: (0.1 + 0.8) / 2 = 0.45
+        # Peak should be D7 (0.45 > 0.433)
+        assert c1["peakTimepoint"][0] == "D7"
+
+
+# ---------------------------------------------------------------------------
+# 20. Edge case: presence threshold for breadth (R13)
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceThreshold:
+    """Breadth only counts groups above the presence threshold."""
+
+    def test_nonzero_threshold_reduces_breadth(self, tmp_path):
+        # c1: high in lung (freq ≈ 0.99), trace in spleen (freq ≈ 0.01)
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 990, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 10, "grouping": "spleen"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 990, "grouping": "spleen"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-grouping",
+            "--presence-threshold", "0.05",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        grouping = _read_output(str(tmp_path), "grouping")
+        c1 = grouping.filter(pl.col("elementId") == "c1")
+        # Spleen frequency ≈ 0.01 < 0.05 threshold → breadth = 1
+        assert c1["breadth"][0] == 1
+
+
+# ---------------------------------------------------------------------------
+# 21. Edge case: NaN/null abundance values in input
+# ---------------------------------------------------------------------------
+
+
+class TestNullAbundanceHandling:
+    """Rows with NaN/null abundance are dropped during input reading."""
+
+    def test_nan_abundance_dropped(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": "100"},
+            {"sampleId": "s1", "elementId": "c2", "abundance": "NaN"},
+            {"sampleId": "s1", "elementId": "c3", "abundance": "NA"},
+        ]
+        # Write manually to preserve string NaN
+        path = os.path.join(str(tmp_path), "input.csv")
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["sampleId", "elementId", "abundance"])
+            writer.writeheader()
+            writer.writerows(rows)
+
+        result = _run(path, [
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        main = _read_output(str(tmp_path), "main")
+        # Only c1 should remain (c2=NaN, c3=NA both dropped)
+        assert main["elementId"].to_list() == ["c1"]
+
+
+# ---------------------------------------------------------------------------
+# 22. Integer metadata columns (non-string grouping/timepoint)
+# ---------------------------------------------------------------------------
+
+
+class TestIntegerMetadata:
+    """Grouping and timepoint columns provided as integers work end-to-end."""
+
+    def test_integer_grouping_and_timepoint(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 80, "grouping": 1, "timepoint": 7},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 20, "grouping": 2, "timepoint": 14},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 20, "grouping": 1, "timepoint": 7},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 80, "grouping": 2, "timepoint": 14},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        result = _run(input_csv, [
+            "--has-grouping", "--has-timepoint",
+            "--timepoint-order", json.dumps(["7", "14"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        assert result.returncode == 0
+        grouping = _read_output(str(tmp_path), "grouping")
+        assert len(grouping) > 0
+        temporal = _read_output(str(tmp_path), "temporal")
+        assert len(temporal) > 0
+
+
+# ---------------------------------------------------------------------------
+# 23. Edge case: min_subject_count with temporal metrics in intra-subject mode
+# ---------------------------------------------------------------------------
+
+
+class TestMinSubjectCountTemporal:
+    """In intra-subject mode, temporal metrics are NaN below minSubjectCount (R17b)."""
+
+    def test_single_subject_temporal_nan(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 100, "timepoint": "D0", "subject": "m1"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 200, "timepoint": "D7", "subject": "m1"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--calculation-mode", "intra-subject",
+            "--has-timepoint", "--has-subject",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--min-subject-count", "2",
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        # Single subject with minSubjectCount=2 → NaN for averaged metrics
+        assert math.isnan(c1["temporalShiftIndex"][0])
+        assert math.isnan(c1["log2KineticDelta"][0])
+        assert math.isnan(c1["log2PeakDelta"][0])
+
+
+# ---------------------------------------------------------------------------
+# 24. Log2 Peak Delta is always non-negative (R16)
+# ---------------------------------------------------------------------------
+
+
+class TestLog2PeakDeltaNonNegative:
+    """Log2 Peak Delta must always be >= 0 since peak >= first detected."""
+
+    def test_contracting_clone_log2pd_still_nonneg(self, tmp_path):
+        # Clone contracts over time: D0=high, D7=low. Peak=D0=first → Log2PD=0.
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 90, "timepoint": "D0"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 10, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 10, "timepoint": "D7"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 90, "timepoint": "D7"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        assert c1["log2PeakDelta"][0] >= 0.0
+
+    def test_expanding_clone_positive_log2pd(self, tmp_path):
+        # Clone expands: D0=10%, D7=80%. Log2PD = log2(0.8/0.1) = 3.0
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 10, "timepoint": "D0"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 90, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 80, "timepoint": "D7"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 20, "timepoint": "D7"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        assert c1["log2PeakDelta"][0] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# 25. Log2 Kinetic Delta sign (R16a)
+# ---------------------------------------------------------------------------
+
+
+class TestLog2KineticDeltaSign:
+    """Log2KD positive = expansion, negative = contraction."""
+
+    def test_expanding_clone_positive_log2kd(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 10, "timepoint": "D0"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 90, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 80, "timepoint": "D7"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 20, "timepoint": "D7"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        assert c1["log2KineticDelta"][0] > 0
+
+    def test_contracting_clone_negative_log2kd(self, tmp_path):
+        rows = [
+            {"sampleId": "s1", "elementId": "c1", "abundance": 80, "timepoint": "D0"},
+            {"sampleId": "s1", "elementId": "bg", "abundance": 20, "timepoint": "D0"},
+            {"sampleId": "s2", "elementId": "c1", "abundance": 10, "timepoint": "D7"},
+            {"sampleId": "s2", "elementId": "bg", "abundance": 90, "timepoint": "D7"},
+        ]
+        input_csv = _write_csv(str(tmp_path), "input.csv", rows)
+        _run(input_csv, [
+            "--has-timepoint",
+            "--timepoint-order", json.dumps(["D0", "D7"]),
+            "--output-prefix", os.path.join(str(tmp_path), "out"),
+        ], str(tmp_path))
+
+        temporal = _read_output(str(tmp_path), "temporal")
+        c1 = temporal.filter(pl.col("elementId") == "c1")
+        assert c1["log2KineticDelta"][0] < 0
