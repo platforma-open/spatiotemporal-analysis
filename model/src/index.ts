@@ -7,7 +7,8 @@ import type {
   SUniversalPColumnId,
 } from '@platforma-sdk/model';
 import {
-  BlockModel,
+  BlockModelV3,
+  DataModelBuilder,
   createPFrameForGraphs,
   createPlDataTableStateV2,
   createPlDataTableV2,
@@ -46,8 +47,15 @@ export type UiState = {
   prevalenceHistogramState: GraphMakerState;
 };
 
-export function getDefaultBlockArgs(): BlockArgs {
-  return {
+export type BlockData = BlockArgs & UiState;
+
+const dataModel = new DataModelBuilder()
+  .from<BlockData>('v1')
+  .upgradeLegacy<BlockArgs, UiState>(({ args, uiState }) => ({
+    ...args,
+    ...uiState,
+  }))
+  .init(() => ({
     defaultBlockLabel: '',
     customBlockLabel: '',
     calculationMode: 'population',
@@ -55,16 +63,8 @@ export function getDefaultBlockArgs(): BlockArgs {
     normalization: 'relative-frequency',
     presenceThreshold: 0,
     minAbundanceThreshold: 0,
-    minSubjectCount: 1,
+    minSubjectCount: 2,
     topN: 20,
-  };
-}
-
-export const model = BlockModel.create()
-
-  .withArgs<BlockArgs>(getDefaultBlockArgs())
-
-  .withUiState<UiState>({
     tableState: createPlDataTableStateV2(),
     heatmapState: {
       title: 'Distribution heatmap',
@@ -89,21 +89,35 @@ export const model = BlockModel.create()
         bar: { fillColor: '#5b9bd5' },
       },
     },
-  })
+  }));
 
-  .argsValid((ctx) => {
-    const { abundanceRef, groupingColumnRef, temporalColumnRef, timepointOrder, subjectColumnRef, calculationMode } = ctx.args;
-    if (abundanceRef === undefined) return false;
+export const model = BlockModelV3.create(dataModel)
+
+  .args((data) => {
+    const { abundanceRef, groupingColumnRef, temporalColumnRef, timepointOrder, subjectColumnRef, calculationMode } = data;
+    if (abundanceRef === undefined) return undefined;
     const hasGrouping = groupingColumnRef !== undefined;
     const hasTemporal = temporalColumnRef !== undefined && timepointOrder.length >= 2;
-    if (!hasGrouping && !hasTemporal) return false;
+    if (!hasGrouping && !hasTemporal) return undefined;
     // Subject required only in intra-subject mode
-    if (calculationMode === 'intra-subject' && subjectColumnRef === undefined) return false;
-    return true;
+    if (calculationMode === 'intra-subject' && subjectColumnRef === undefined) return undefined;
+    return {
+      abundanceRef,
+      calculationMode,
+      groupingColumnRef,
+      temporalColumnRef,
+      timepointOrder,
+      subjectColumnRef,
+      normalization: data.normalization,
+      presenceThreshold: data.presenceThreshold,
+      minAbundanceThreshold: data.minAbundanceThreshold,
+      minSubjectCount: data.minSubjectCount,
+      topN: data.topN,
+    };
   })
 
-  // Abundance column options
-  .output('abundanceOptions', (ctx) =>
+  // Abundance column options — retentive so the dropdown stays populated while result pool rebuilds
+  .retentiveOutput('abundanceOptions', (ctx) =>
     ctx.resultPool.getOptions([{
       axes: [
         { name: 'pl7.app/sampleId' },
@@ -117,9 +131,9 @@ export const model = BlockModel.create()
     }], { includeNativeLabel: true }),
   )
 
-  // Metadata column options
-  .output('metadataOptions', (ctx) => {
-    const anchor = ctx.args.abundanceRef;
+  // Metadata column options — retentive so the dropdown stays populated while result pool rebuilds
+  .retentiveOutput('metadataOptions', (ctx) => {
+    const anchor = ctx.data.abundanceRef;
     if (anchor === undefined) return undefined;
     return ctx.resultPool.getCanonicalOptions({ main: anchor },
       [{
@@ -131,18 +145,21 @@ export const model = BlockModel.create()
 
   // Dataset spec for detecting cluster vs clonotype
   .output('datasetSpec', (ctx) => {
-    if (ctx.args.abundanceRef) return ctx.resultPool.getPColumnSpecByRef(ctx.args.abundanceRef);
+    if (ctx.data.abundanceRef) return ctx.resultPool.getPColumnSpecByRef(ctx.data.abundanceRef);
     return undefined;
   })
 
   // PFrame containing temporal column data (for fetching unique values in UI)
   .output('temporalColumnPframe', (ctx) => {
-    const { temporalColumnRef, abundanceRef } = ctx.args;
+    const { temporalColumnRef, abundanceRef } = ctx.data;
     if (!temporalColumnRef || !abundanceRef) return undefined;
 
+    // SUniversalPColumnId is the JSON-serialised form of AnchoredPColumnSelector,
+    // which is not re-exported from @platforma-sdk/model.
+    type ColumnSelector = Parameters<(typeof ctx.resultPool)['getAnchoredPColumns']>[1];
     const cols = ctx.resultPool.getAnchoredPColumns(
       { main: abundanceRef },
-      JSON.parse(temporalColumnRef) as never,
+      JSON.parse(temporalColumnRef) as ColumnSelector,
     );
     if (!cols || cols.length === 0) return undefined;
     return ctx.createPFrame(cols);
@@ -150,12 +167,13 @@ export const model = BlockModel.create()
 
   // Column ID for the temporal column (needed by getSingleColumnData in UI)
   .output('temporalColumnId', (ctx) => {
-    const { temporalColumnRef, abundanceRef } = ctx.args;
+    const { temporalColumnRef, abundanceRef } = ctx.data;
     if (!temporalColumnRef || !abundanceRef) return undefined;
 
+    type ColumnSelector = Parameters<(typeof ctx.resultPool)['getAnchoredPColumns']>[1];
     const cols = ctx.resultPool.getAnchoredPColumns(
       { main: abundanceRef },
-      JSON.parse(temporalColumnRef) as never,
+      JSON.parse(temporalColumnRef) as ColumnSelector,
     );
     return cols?.[0]?.id;
   })
@@ -164,36 +182,42 @@ export const model = BlockModel.create()
   .outputWithStatus('mainTable', (ctx) => {
     const pCols = ctx.outputs?.resolve('mainPf')?.getPColumns();
     if (pCols === undefined) return undefined;
-    return createPlDataTableV2(ctx, pCols, ctx.uiState.tableState);
+    return createPlDataTableV2(ctx, pCols, ctx.data.tableState);
   })
 
-  // Heatmap PFrame + raw columns for graph defaults
+  // Heatmap PFrame + raw columns for graph defaults (only when grouping is configured)
   .outputWithStatus('heatmapPf', (ctx): PFrameHandle | undefined => {
+    if (!ctx.data.groupingColumnRef) return undefined;
     const pCols = ctx.outputs?.resolve('heatmapPf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
   .output('heatmapPCols', (ctx) => {
+    if (!ctx.data.groupingColumnRef) return undefined;
     return ctx.outputs?.resolve('heatmapPf')?.getPColumns();
   })
 
-  // Temporal line PFrame + raw columns for graph defaults
+  // Temporal line PFrame + raw columns for graph defaults (only when temporal is configured with 2+ timepoints)
   .outputWithStatus('temporalLinePf', (ctx): PFrameHandle | undefined => {
+    if (!ctx.data.temporalColumnRef || ctx.data.timepointOrder.length < 2) return undefined;
     const pCols = ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
   .output('temporalLinePCols', (ctx) => {
+    if (!ctx.data.temporalColumnRef || ctx.data.timepointOrder.length < 2) return undefined;
     return ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
   })
 
-  // Prevalence histogram PFrame + raw columns for graph defaults
+  // Prevalence histogram PFrame + raw columns for graph defaults (only when subject is configured)
   .outputWithStatus('prevalenceHistogramPf', (ctx): PFrameHandle | undefined => {
+    if (!ctx.data.subjectColumnRef) return undefined;
     const pCols = ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
   .output('prevalenceHistogramPCols', (ctx) => {
+    if (!ctx.data.subjectColumnRef) return undefined;
     return ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
   })
 
@@ -201,7 +225,7 @@ export const model = BlockModel.create()
 
   .title(() => 'Clonotype Distribution')
 
-  .subtitle((ctx) => ctx.args.customBlockLabel || ctx.args.defaultBlockLabel)
+  .subtitle((ctx) => ctx.data.customBlockLabel || ctx.data.defaultBlockLabel)
 
   .sections((ctx) => {
     const sections: { type: 'link'; href: `/${string}`; label: string }[] = [
@@ -209,12 +233,12 @@ export const model = BlockModel.create()
       { type: 'link', href: '/heatmap', label: 'Distribution Heatmap' },
       { type: 'link', href: '/temporal', label: 'Temporal Trajectory' },
     ];
-    if (ctx.args.subjectColumnRef !== undefined) {
+    if (ctx.data.subjectColumnRef !== undefined) {
       sections.push({ type: 'link', href: '/prevalence', label: 'Subject Prevalence' });
     }
     return sections;
   })
 
-  .done(2);
+  .done();
 
 export type BlockOutputs = InferOutputsType<typeof model>;

@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug pytest",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/", "-v", "-s"],
+      "cwd": "${workspaceFolder}/software",
+      "env": { "PYTHONPATH": "${workspaceFolder}/software/src" },
+      "justMyCode": false
+    }
+  ]
+}

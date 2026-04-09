@@ -112,6 +112,7 @@ wf.body(func(args) {
 		run()
 
 	elementAxisSpec := abundanceSpec.axesSpec[1]
+	blockDomain := {"pl7.app/vdj/compartmentAnalysis/blockId": blockId}
 
 	traceLabel := "Clonotype Distribution - " + mode
 	if normalization == "clr" {
@@ -132,7 +133,7 @@ wf.body(func(args) {
 			column: "subjectPrevalence", id: "subjectPrevalence",
 			spec: {
 				name: "pl7.app/vdj/subjectPrevalence", valueType: "Int",
-				domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
+				domain: blockDomain,
 				annotations: {
 					"pl7.app/label": "Subject Prevalence",
 					"pl7.app/isScore": "true",
@@ -148,7 +149,7 @@ wf.body(func(args) {
 			column: "subjectPrevalenceFraction", id: "subjectPrevalenceFraction",
 			spec: {
 				name: "pl7.app/vdj/subjectPrevalenceFraction", valueType: "Double",
-				domain: {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId},
+				domain: blockDomain,
 				annotations: {
 					"pl7.app/label": "Subject Prevalence Fraction",
 					"pl7.app/isScore": "true",
@@ -164,14 +165,14 @@ wf.body(func(args) {
 	// Grouping metrics
 	if hasGrouping {
 		varDomain := {
-			"pl7.app/vdj/spatiotemporalAnalysis/variable": "Grouping",
-			"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId
+			"pl7.app/vdj/compartmentAnalysis/variable": "Grouping",
+			"pl7.app/vdj/compartmentAnalysis/blockId": blockId
 		}
 
 		mainImportColumns = append(mainImportColumns, {
 			column: "ri", id: "ri",
 			spec: {
-				name: "pl7.app/vdj/restrictionIndex", valueType: "Double",
+				name: "pl7.app/vdj/compartmentRestrictionIndex", valueType: "Double",
 				domain: varDomain,
 				annotations: {
 					"pl7.app/label": "Restriction Index",
@@ -206,7 +207,7 @@ wf.body(func(args) {
 				name: "pl7.app/vdj/breadth", valueType: "Int",
 				domain: varDomain,
 				annotations: {
-					"pl7.app/label": "Breadth",
+					"pl7.app/label": "Breadth Score",
 					"pl7.app/isScore": "true",
 					"pl7.app/score/rankingOrder": "decreasing",
 					"pl7.app/table/visibility": "optional",
@@ -250,7 +251,7 @@ wf.body(func(args) {
 			mainImportColumns = append(mainImportColumns, {
 				column: "stdRi", id: "stdRi",
 				spec: {
-					name: "pl7.app/vdj/restrictionIndexStdDev", valueType: "Double",
+					name: "pl7.app/vdj/compartmentRestrictionIndexStdDev", valueType: "Double",
 					domain: varDomain,
 					annotations: {
 						"pl7.app/label": "RI StdDev",
@@ -267,7 +268,7 @@ wf.body(func(args) {
 
 	// Temporal columns
 	if hasTimepoint && len(args.timepointOrder) >= 2 {
-		temporalDomain := {"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId}
+		temporalDomain := {"pl7.app/vdj/compartmentAnalysis/blockId": blockId}
 
 		mainImportColumns = append(mainImportColumns, {
 			column: "peakTimepoint", id: "peakTimepoint",
@@ -325,7 +326,7 @@ wf.body(func(args) {
 					"pl7.app/label": "Log2 Kinetic Delta",
 					"pl7.app/isScore": "true",
 					"pl7.app/score/rankingOrder": "decreasing",
-					"pl7.app/table/visibility": "optional",
+					"pl7.app/table/visibility": "default",
 					"pl7.app/table/orderPriority": "75",
 					"pl7.app/format": ".2f"
 				}
@@ -362,8 +363,9 @@ wf.body(func(args) {
 			axes: [
 				{column: "elementId", spec: elementAxisSpec},
 				{column: "groupCategory", spec: {
-					name: "pl7.app/vdj/spatiotemporalAnalysis/groupCategory",
+					name: "pl7.app/vdj/compartmentAnalysis/groupCategory",
 					type: "String",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Group"}
 				}}
 			],
@@ -371,6 +373,7 @@ wf.body(func(args) {
 				column: "normalizedFrequency", id: "normalizedFrequency",
 				spec: {
 					name: "pl7.app/vdj/normalizedFrequency", valueType: "Double",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Relative Frequency", "pl7.app/format": ".4f"}
 				}
 			}],
@@ -387,8 +390,9 @@ wf.body(func(args) {
 			axes: [
 				{column: "elementId", spec: elementAxisSpec},
 				{column: "timepointValue", spec: {
-					name: "pl7.app/vdj/spatiotemporalAnalysis/timepoint",
+					name: "pl7.app/vdj/compartmentAnalysis/timepoint",
 					type: "String",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Timepoint"}
 				}}
 			],
@@ -396,6 +400,7 @@ wf.body(func(args) {
 				column: "frequency", id: "frequency",
 				spec: {
 					name: "pl7.app/vdj/frequency", valueType: "Double",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Frequency", "pl7.app/format": ".6f"}
 				}
 			}],
@@ -412,8 +417,9 @@ wf.body(func(args) {
 			axes: [{
 				column: "prevalenceCount",
 				spec: {
-					name: "pl7.app/vdj/spatiotemporalAnalysis/prevalenceCount",
+					name: "pl7.app/vdj/compartmentAnalysis/prevalenceCount",
 					type: "Int",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Number of Subjects"}
 				}
 			}],
@@ -421,6 +427,7 @@ wf.body(func(args) {
 				column: "cloneCount", id: "cloneCount",
 				spec: {
 					name: "pl7.app/vdj/cloneCount", valueType: "Int",
+					domain: blockDomain,
 					annotations: {"pl7.app/label": "Number of Clones"}
 				}
 			}],
