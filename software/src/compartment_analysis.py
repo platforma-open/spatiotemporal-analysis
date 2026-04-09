@@ -53,13 +53,17 @@ def read_input(path: str, has_grouping: bool, has_timepoint: bool, min_abundance
     if min_abundance_threshold > 0:
         df = df.filter(pl.col("abundance").max().over("elementId") >= min_abundance_threshold)
 
-    # Force categorical columns to String
+    # Force categorical columns to String and exclude missing metadata (R7b)
     if has_grouping and COL_GROUPING in df.columns:
         df = df.with_columns(pl.col(COL_GROUPING).cast(pl.String))
     if has_timepoint and COL_TIMEPOINT in df.columns:
         df = df.with_columns(pl.col(COL_TIMEPOINT).cast(pl.String))
     if COL_SUBJECT in df.columns:
         df = df.with_columns(pl.col(COL_SUBJECT).cast(pl.String))
+        # Exclude samples with missing/empty subject (R7b) — they still
+        # participate in non-subject computations via the pre-filter copy,
+        # but must not corrupt prevalence or consensus metrics.
+        df = df.filter(pl.col(COL_SUBJECT).is_not_null() & (pl.col(COL_SUBJECT) != ""))
 
     return df
 
@@ -250,24 +254,46 @@ def compute_grouping_metrics(
 
     # --- Vectorized consensus aggregation ---
 
-    # 1. Mean/std RI with minSubjectCount threshold
-    ri_agg = per_subject_metrics.group_by("elementId").agg(
+    # Only subjects where the clone is actually detected (breadth > 0) count
+    # toward _nSubjects for the minSubjectCount threshold. Subjects with 0
+    # frequency in all groups are absent, not present (R17b uses "present in").
+    present_subjects = per_subject_metrics.filter(pl.col("breadth") > 0)
+
+    # 1. Subject count and breadth from present subjects
+    all_subject_agg = present_subjects.group_by("elementId").agg(
         [
-            pl.col("ri").drop_nulls().mean().alias("_meanRi"),
-            pl.col("ri").drop_nulls().std(ddof=1).alias("_stdRi"),
-            pl.col("ri").drop_nulls().count().alias("_riCount"),
             pl.len().alias("_nSubjects"),
             pl.col("breadth").mean().alias("_meanBreadth"),
         ]
     )
 
+    # 2. Mean/std RI from multi-group subjects only (R33: subjects sampled from
+    # only one group have trivial RI=1.0 — an artifact of sampling, not
+    # biology — and must be excluded from consensus RI statistics)
+    ri_eligible = present_subjects.filter(pl.col("breadth") > 1)
+    ri_agg_raw = ri_eligible.group_by("elementId").agg(
+        [
+            pl.col("ri").drop_nulls().mean().alias("_meanRi"),
+            pl.col("ri").drop_nulls().std(ddof=1).alias("_stdRi"),
+            pl.col("ri").drop_nulls().count().alias("_riCount"),
+        ]
+    )
+
+    ri_agg = all_subject_agg.join(ri_agg_raw, on="elementId", how="left")
+
     ri_agg = ri_agg.with_columns(
         [
-            pl.when(pl.col("_nSubjects") >= min_subject_count)
+            pl.when(
+                (pl.col("_nSubjects") >= min_subject_count)
+                & pl.col("_meanRi").is_not_null()
+            )
             .then(pl.col("_meanRi"))
             .otherwise(float("nan"))
             .alias("meanRi"),
-            pl.when((pl.col("_nSubjects") >= min_subject_count) & (pl.col("_riCount") > 1))
+            pl.when(
+                (pl.col("_nSubjects") >= min_subject_count)
+                & (pl.col("_riCount").fill_null(0) > 1)
+            )
             .then(pl.col("_stdRi"))
             .otherwise(float("nan"))
             .alias("stdRi"),
