@@ -12,3 +12,14 @@ vite.config.*.timestamp-*
 .DS_Store
 /.idea
 .vscode/sftp.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
