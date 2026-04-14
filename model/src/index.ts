@@ -177,33 +177,39 @@ export const model = BlockModelV3.create(dataModel)
     return createPlDataTableV2(ctx, pCols, ctx.data.tableState);
   })
 
-  // Heatmap PFrame + raw columns for graph defaults
+  // Heatmap PFrame + raw columns for graph defaults (requires grouping variable)
   .outputWithStatus('heatmapPf', (ctx): PFrameHandle | undefined => {
+    if (ctx.data.groupingColumnRef === undefined) return undefined;
     const pCols = ctx.outputs?.resolve('heatmapPf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
   .output('heatmapPCols', (ctx) => {
+    if (ctx.data.groupingColumnRef === undefined) return undefined;
     return ctx.outputs?.resolve('heatmapPf')?.getPColumns();
   })
 
-  // Temporal line PFrame + raw columns for graph defaults
+  // Temporal line PFrame + raw columns for graph defaults (requires temporal variable)
   .outputWithStatus('temporalLinePf', (ctx): PFrameHandle | undefined => {
+    if (ctx.data.temporalColumnRef === undefined) return undefined;
     const pCols = ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
   .output('temporalLinePCols', (ctx) => {
+    if (ctx.data.temporalColumnRef === undefined) return undefined;
     return ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
   })
 
-  // Prevalence histogram PFrame + raw columns for graph defaults
+  // Prevalence histogram PFrame + raw columns for graph defaults (requires subject variable)
   .outputWithStatus('prevalenceHistogramPf', (ctx): PFrameHandle | undefined => {
+    if (ctx.data.subjectColumnRef === undefined) return undefined;
     const pCols = ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
     if (pCols === undefined) return undefined;
     return createPFrameForGraphs(ctx, pCols);
   })
   .output('prevalenceHistogramPCols', (ctx) => {
+    if (ctx.data.subjectColumnRef === undefined) return undefined;
     return ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
   })
 
@@ -216,9 +222,13 @@ export const model = BlockModelV3.create(dataModel)
   .sections((ctx) => {
     const sections: { type: 'link'; href: `/${string}`; label: string }[] = [
       { type: 'link', href: '/', label: 'Main' },
-      { type: 'link', href: '/heatmap', label: 'Distribution Heatmap' },
-      { type: 'link', href: '/temporal', label: 'Temporal Trajectory' },
     ];
+    if (ctx.data.groupingColumnRef !== undefined) {
+      sections.push({ type: 'link', href: '/heatmap', label: 'Distribution Heatmap' });
+    }
+    if (ctx.data.temporalColumnRef !== undefined) {
+      sections.push({ type: 'link', href: '/temporal', label: 'Temporal Trajectory' });
+    }
     if (ctx.data.subjectColumnRef !== undefined) {
       sections.push({ type: 'link', href: '/prevalence', label: 'Subject Prevalence' });
     }
