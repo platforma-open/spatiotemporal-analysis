@@ -180,37 +180,61 @@ export const model = BlockModelV3.create(dataModel)
   // Heatmap PFrame + raw columns for graph defaults (requires grouping variable)
   .outputWithStatus('heatmapPf', (ctx): PFrameHandle | undefined => {
     if (ctx.data.groupingColumnRef === undefined) return undefined;
-    const pCols = ctx.outputs?.resolve('heatmapPf')?.getPColumns();
-    if (pCols === undefined) return undefined;
-    return createPFrameForGraphs(ctx, pCols);
+    try {
+      const pCols = ctx.outputs?.resolve('heatmapPf')?.getPColumns();
+      if (pCols === undefined) return undefined;
+      return createPFrameForGraphs(ctx, pCols);
+    } catch {
+      return undefined;
+    }
   })
   .output('heatmapPCols', (ctx) => {
     if (ctx.data.groupingColumnRef === undefined) return undefined;
-    return ctx.outputs?.resolve('heatmapPf')?.getPColumns();
+    try {
+      return ctx.outputs?.resolve('heatmapPf')?.getPColumns();
+    } catch {
+      return undefined;
+    }
   })
 
   // Temporal line PFrame + raw columns for graph defaults (requires temporal variable)
   .outputWithStatus('temporalLinePf', (ctx): PFrameHandle | undefined => {
     if (ctx.data.temporalColumnRef === undefined) return undefined;
-    const pCols = ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
-    if (pCols === undefined) return undefined;
-    return createPFrameForGraphs(ctx, pCols);
+    try {
+      const pCols = ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
+      if (pCols === undefined) return undefined;
+      return createPFrameForGraphs(ctx, pCols);
+    } catch {
+      return undefined;
+    }
   })
   .output('temporalLinePCols', (ctx) => {
     if (ctx.data.temporalColumnRef === undefined) return undefined;
-    return ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
+    try {
+      return ctx.outputs?.resolve('temporalLinePf')?.getPColumns();
+    } catch {
+      return undefined;
+    }
   })
 
   // Prevalence histogram PFrame + raw columns for graph defaults (requires subject variable)
   .outputWithStatus('prevalenceHistogramPf', (ctx): PFrameHandle | undefined => {
     if (ctx.data.subjectColumnRef === undefined) return undefined;
-    const pCols = ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
-    if (pCols === undefined) return undefined;
-    return createPFrameForGraphs(ctx, pCols);
+    try {
+      const pCols = ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
+      if (pCols === undefined) return undefined;
+      return createPFrameForGraphs(ctx, pCols);
+    } catch {
+      return undefined;
+    }
   })
   .output('prevalenceHistogramPCols', (ctx) => {
     if (ctx.data.subjectColumnRef === undefined) return undefined;
-    return ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
+    try {
+      return ctx.outputs?.resolve('prevalenceHistogramPf')?.getPColumns();
+    } catch {
+      return undefined;
+    }
   })
 
   .output('isRunning', (ctx) => ctx.outputs?.getIsReadyOrError() === false)

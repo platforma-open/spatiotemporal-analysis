@@ -65,6 +65,9 @@ watchEffect(() => {
   const temporalLabel = findLabel(app.model.data.temporalColumnRef);
   if (temporalLabel) parts.push(temporalLabel);
 
+  const subjectLabel = findLabel(app.model.data.subjectColumnRef);
+  if (subjectLabel) parts.push(subjectLabel);
+
   app.model.data.defaultBlockLabel = parts.join(', ');
 });
 
