@@ -7,7 +7,8 @@ import type {
   SUniversalPColumnId,
 } from '@platforma-sdk/model';
 import {
-  BlockModel,
+  BlockModelV3,
+  DataModelBuilder,
   createPFrameForGraphs,
   createPlDataTableStateV2,
   createPlDataTableV2,
@@ -16,55 +17,49 @@ import {
 export type BlockArgs = {
   defaultBlockLabel: string;
   customBlockLabel: string;
-
-  // Input
   abundanceRef?: PlRef;
-
-  // Mode
   calculationMode: 'population' | 'intra-subject';
-
-  // Variable assignments
   groupingColumnRef?: SUniversalPColumnId;
   temporalColumnRef?: SUniversalPColumnId;
   timepointOrder: string[];
-  subjectColumnRef?: SUniversalPColumnId; // optional in population mode
-
-  // Normalization
+  subjectColumnRef?: SUniversalPColumnId;
   normalization: 'relative-frequency' | 'clr';
-
-  // Thresholds & filters
   presenceThreshold: number;
   minAbundanceThreshold: number;
   minSubjectCount: number;
   topN: number;
 };
 
-export type UiState = {
+export type BlockData = BlockArgs & {
   tableState: PlDataTableStateV2;
   heatmapState: GraphMakerState;
   temporalLineState: GraphMakerState;
   prevalenceHistogramState: GraphMakerState;
 };
 
-export function getDefaultBlockArgs(): BlockArgs {
-  return {
+type LegacyUiState = {
+  tableState: PlDataTableStateV2;
+  heatmapState: GraphMakerState;
+  temporalLineState: GraphMakerState;
+  prevalenceHistogramState: GraphMakerState;
+};
+
+const dataModel = new DataModelBuilder()
+  .from<BlockData>('v1')
+  .upgradeLegacy<BlockArgs, LegacyUiState>(({ args, uiState }) => ({
+    ...args,
+    ...uiState,
+  }))
+  .init(() => ({
     defaultBlockLabel: '',
     customBlockLabel: '',
-    calculationMode: 'population',
+    calculationMode: 'population' as const,
     timepointOrder: [],
-    normalization: 'relative-frequency',
+    normalization: 'relative-frequency' as const,
     presenceThreshold: 0,
     minAbundanceThreshold: 0,
     minSubjectCount: 1,
     topN: 20,
-  };
-}
-
-export const model = BlockModel.create()
-
-  .withArgs<BlockArgs>(getDefaultBlockArgs())
-
-  .withUiState<UiState>({
     tableState: createPlDataTableStateV2(),
     heatmapState: {
       title: 'Distribution heatmap',
@@ -89,17 +84,32 @@ export const model = BlockModel.create()
         bar: { fillColor: '#5b9bd5' },
       },
     },
-  })
+  }));
 
-  .argsValid((ctx) => {
-    const { abundanceRef, groupingColumnRef, temporalColumnRef, timepointOrder, subjectColumnRef, calculationMode } = ctx.args;
-    if (abundanceRef === undefined) return false;
+export const model = BlockModelV3.create(dataModel)
+
+  .args<BlockArgs>((data) => {
+    const { abundanceRef, groupingColumnRef, temporalColumnRef, timepointOrder, subjectColumnRef, calculationMode } = data;
+    if (abundanceRef === undefined) throw new Error('Abundance ref required');
     const hasGrouping = groupingColumnRef !== undefined;
     const hasTemporal = temporalColumnRef !== undefined && timepointOrder.length >= 2;
-    if (!hasGrouping && !hasTemporal) return false;
-    // Subject required only in intra-subject mode
-    if (calculationMode === 'intra-subject' && subjectColumnRef === undefined) return false;
-    return true;
+    if (!hasGrouping && !hasTemporal) throw new Error('At least grouping or temporal variable required');
+    if (calculationMode === 'intra-subject' && subjectColumnRef === undefined) throw new Error('Subject required in intra-subject mode');
+    return {
+      defaultBlockLabel: data.defaultBlockLabel,
+      customBlockLabel: data.customBlockLabel,
+      abundanceRef,
+      calculationMode,
+      groupingColumnRef,
+      temporalColumnRef,
+      timepointOrder,
+      subjectColumnRef,
+      normalization: data.normalization,
+      presenceThreshold: data.presenceThreshold,
+      minAbundanceThreshold: data.minAbundanceThreshold,
+      minSubjectCount: data.minSubjectCount,
+      topN: data.topN,
+    };
   })
 
   // Abundance column options
@@ -119,7 +129,7 @@ export const model = BlockModel.create()
 
   // Metadata column options
   .output('metadataOptions', (ctx) => {
-    const anchor = ctx.args.abundanceRef;
+    const anchor = ctx.data.abundanceRef;
     if (anchor === undefined) return undefined;
     return ctx.resultPool.getCanonicalOptions({ main: anchor },
       [{
@@ -131,13 +141,13 @@ export const model = BlockModel.create()
 
   // Dataset spec for detecting cluster vs clonotype
   .output('datasetSpec', (ctx) => {
-    if (ctx.args.abundanceRef) return ctx.resultPool.getPColumnSpecByRef(ctx.args.abundanceRef);
+    if (ctx.data.abundanceRef) return ctx.resultPool.getPColumnSpecByRef(ctx.data.abundanceRef);
     return undefined;
   })
 
   // PFrame containing temporal column data (for fetching unique values in UI)
   .output('temporalColumnPframe', (ctx) => {
-    const { temporalColumnRef, abundanceRef } = ctx.args;
+    const { temporalColumnRef, abundanceRef } = ctx.data;
     if (!temporalColumnRef || !abundanceRef) return undefined;
 
     const cols = ctx.resultPool.getAnchoredPColumns(
@@ -150,7 +160,7 @@ export const model = BlockModel.create()
 
   // Column ID for the temporal column (needed by getSingleColumnData in UI)
   .output('temporalColumnId', (ctx) => {
-    const { temporalColumnRef, abundanceRef } = ctx.args;
+    const { temporalColumnRef, abundanceRef } = ctx.data;
     if (!temporalColumnRef || !abundanceRef) return undefined;
 
     const cols = ctx.resultPool.getAnchoredPColumns(
@@ -164,7 +174,7 @@ export const model = BlockModel.create()
   .outputWithStatus('mainTable', (ctx) => {
     const pCols = ctx.outputs?.resolve('mainPf')?.getPColumns();
     if (pCols === undefined) return undefined;
-    return createPlDataTableV2(ctx, pCols, ctx.uiState.tableState);
+    return createPlDataTableV2(ctx, pCols, ctx.data.tableState);
   })
 
   // Heatmap PFrame + raw columns for graph defaults
@@ -201,7 +211,7 @@ export const model = BlockModel.create()
 
   .title(() => 'Clonotype Distribution')
 
-  .subtitle((ctx) => ctx.args.customBlockLabel || ctx.args.defaultBlockLabel)
+  .subtitle((ctx) => ctx.data.customBlockLabel || ctx.data.defaultBlockLabel)
 
   .sections((ctx) => {
     const sections: { type: 'link'; href: `/${string}`; label: string }[] = [
@@ -209,12 +219,12 @@ export const model = BlockModel.create()
       { type: 'link', href: '/heatmap', label: 'Distribution Heatmap' },
       { type: 'link', href: '/temporal', label: 'Temporal Trajectory' },
     ];
-    if (ctx.args.subjectColumnRef !== undefined) {
+    if (ctx.data.subjectColumnRef !== undefined) {
       sections.push({ type: 'link', href: '/prevalence', label: 'Subject Prevalence' });
     }
     return sections;
   })
 
-  .done(2);
+  .done();
 
 export type BlockOutputs = InferOutputsType<typeof model>;

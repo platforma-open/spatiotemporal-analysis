@@ -1,12 +1,12 @@
 import { model } from '@platforma-open/milaboratories.spatiotemporal-analysis.model';
-import { defineApp } from '@platforma-sdk/ui-vue';
+import { defineAppV3 } from '@platforma-sdk/ui-vue';
 import MainPage from './pages/MainPage.vue';
 import HeatmapPage from './pages/HeatmapPage.vue';
 import TemporalLinePage from './pages/TemporalLinePage.vue';
 import PrevalenceHistogramPage from './pages/PrevalenceHistogramPage.vue';
 
-export const sdkPlugin = defineApp(model, (app) => {
-  app.model.args.customBlockLabel ??= '';
+export const sdkPlugin = defineAppV3(model, (app) => {
+  app.model.data.customBlockLabel ??= '';
 
   return {
     progress: () => {

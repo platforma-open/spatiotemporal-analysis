@@ -1,15 +1,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-explicit-any */
-import {
-  getDefaultBlockArgs,
-} from '@platforma-open/milaboratories.spatiotemporal-analysis.model';
 import type {
-  BlockArgs,
+  BlockData,
 } from '@platforma-open/milaboratories.spatiotemporal-analysis.model';
 import { blockSpec as clonotypingBlockSpec } from '@platforma-open/milaboratories.mixcr-clonotyping-2';
 import type {
   BlockArgs as MiXCRClonotypingBlockArgs,
   BlockOutputs as MiXCRClonotypingBlockOutputs,
-  platforma as mixcrPlatforma,
 } from '@platforma-open/milaboratories.mixcr-clonotyping-2.model';
 import {
   SupportedPresetList,
@@ -17,8 +13,7 @@ import {
 } from '@platforma-open/milaboratories.mixcr-clonotyping-2.model';
 import { blockSpec as samplesAndDataBlockSpec } from '@platforma-open/milaboratories.samples-and-data';
 import type { BlockArgs as SamplesAndDataBlockArgs } from '@platforma-open/milaboratories.samples-and-data.model';
-import type { InferBlockState } from '@platforma-sdk/model';
-import { wrapOutputs } from '@platforma-sdk/model';
+import { createPlDataTableStateV2, wrapOutputs } from '@platforma-sdk/model';
 import { awaitStableState, blockTest } from '@platforma-sdk/test';
 import { blockSpec as compartmentAnalysisBlockSpec } from 'this-block';
 
@@ -124,12 +119,12 @@ blockTest(
     });
 
     // Step 3: Configure and run MiXCR Clonotyping
-    const clonotypingStableState1 = (await awaitStableState(
+    const clonotypingStableState1 = await awaitStableState(
       project.getBlockState(clonotypingBlockId),
       200000,
-    )) as InferBlockState<typeof mixcrPlatforma>;
+    );
 
-    const clonotypingOutputs1 = wrapOutputs<MiXCRClonotypingBlockOutputs>(clonotypingStableState1.outputs);
+    const clonotypingOutputs1 = wrapOutputs<MiXCRClonotypingBlockOutputs>(clonotypingStableState1.outputs as any);
     expect(clonotypingOutputs1.presets).toBeDefined();
 
     const presets = SupportedPresetList.parse(
@@ -148,11 +143,11 @@ blockTest(
     } satisfies MiXCRClonotypingBlockArgs);
 
     await project.runBlock(clonotypingBlockId);
-    const clonotypingStableState3 = await helpers.awaitBlockDoneAndGetStableBlockState<typeof mixcrPlatforma>(
+    const clonotypingStableState3 = await helpers.awaitBlockDoneAndGetStableBlockState(
       clonotypingBlockId,
       300000,
     );
-    const clonotypingOutputs3 = wrapOutputs<MiXCRClonotypingBlockOutputs>(clonotypingStableState3.outputs);
+    const clonotypingOutputs3 = wrapOutputs<MiXCRClonotypingBlockOutputs>(clonotypingStableState3.outputs as any);
     expect(clonotypingOutputs3.reports.isComplete).toEqual(true);
     console.log('MiXCR Clonotyping completed successfully');
 
@@ -171,10 +166,25 @@ blockTest(
     console.log('Abundance options:', abundanceOpts.map((o: any) => o.label));
 
     // Step 4b: Set abundanceRef first so metadata options can resolve
-    await project.setBlockArgs(compartmentBlockId, {
-      ...getDefaultBlockArgs(),
-      abundanceRef: abundanceOpts[0].ref,
-    } satisfies BlockArgs);
+    await project.mutateBlockStorage(compartmentBlockId, {
+      operation: 'update-block-data',
+      value: {
+        defaultBlockLabel: '',
+        customBlockLabel: '',
+        abundanceRef: abundanceOpts[0].ref,
+        calculationMode: 'population',
+        timepointOrder: [],
+        normalization: 'relative-frequency',
+        presenceThreshold: 0,
+        minAbundanceThreshold: 0,
+        minSubjectCount: 1,
+        topN: 20,
+        tableState: createPlDataTableStateV2(),
+        heatmapState: { title: 'Distribution heatmap', template: 'heatmap', currentTab: null },
+        temporalLineState: { title: 'Temporal frequency trajectory', template: 'curve_dots', currentTab: null, layersSettings: { curve: { smoothing: false } } },
+        prevalenceHistogramState: { title: 'Subject prevalence distribution', template: 'bar', currentTab: null, layersSettings: { bar: { fillColor: '#5b9bd5' } } },
+      } satisfies BlockData,
+    });
 
     // Wait for metadata options to populate
     const compartmentState1b = await awaitStableState(
@@ -196,8 +206,8 @@ blockTest(
     expect(tissueOption, 'Tissue metadata option').toBeDefined();
     expect(donorOption, 'Donor metadata option').toBeDefined();
 
-    // Step 5: Configure Compartment Analysis with full args
-    const blockArgs: BlockArgs = {
+    // Step 5: Configure Compartment Analysis with full data
+    const blockData: BlockData = {
       defaultBlockLabel: '',
       customBlockLabel: '',
       abundanceRef: abundanceOpts[0].ref,
@@ -211,9 +221,16 @@ blockTest(
       minAbundanceThreshold: 0,
       minSubjectCount: 2,
       topN: 20,
+      tableState: createPlDataTableStateV2(),
+      heatmapState: { title: 'Distribution heatmap', template: 'heatmap', currentTab: null },
+      temporalLineState: { title: 'Temporal frequency trajectory', template: 'curve_dots', currentTab: null, layersSettings: { curve: { smoothing: false } } },
+      prevalenceHistogramState: { title: 'Subject prevalence distribution', template: 'bar', currentTab: null, layersSettings: { bar: { fillColor: '#5b9bd5' } } },
     };
 
-    await project.setBlockArgs(compartmentBlockId, blockArgs);
+    await project.mutateBlockStorage(compartmentBlockId, {
+      operation: 'update-block-data',
+      value: blockData,
+    });
 
     // Step 6: Run Compartment Analysis
     await project.runBlock(compartmentBlockId);

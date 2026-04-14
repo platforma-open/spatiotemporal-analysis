@@ -28,7 +28,7 @@ const showSettings = () => {
 };
 
 function setInput(inputRef?: PlRef) {
-  app.model.args.abundanceRef = inputRef;
+  app.model.data.abundanceRef = inputRef;
 }
 
 const calculationModeOptions = [
@@ -56,20 +56,20 @@ watchEffect(() => {
 
   const parts: string[] = [];
 
-  const mode = app.model.args.calculationMode;
+  const mode = app.model.data.calculationMode;
   parts.push(mode === 'intra-subject' ? 'Intra-Subject' : 'Population');
 
-  const groupLabel = findLabel(app.model.args.groupingColumnRef);
+  const groupLabel = findLabel(app.model.data.groupingColumnRef);
   if (groupLabel) parts.push(groupLabel);
 
-  const temporalLabel = findLabel(app.model.args.temporalColumnRef);
+  const temporalLabel = findLabel(app.model.data.temporalColumnRef);
   if (temporalLabel) parts.push(temporalLabel);
 
-  app.model.args.defaultBlockLabel = parts.join(', ');
+  app.model.data.defaultBlockLabel = parts.join(', ');
 });
 
 // Subject is required only in intra-subject mode
-const subjectRequired = computed(() => app.model.args.calculationMode === 'intra-subject');
+const subjectRequired = computed(() => app.model.data.calculationMode === 'intra-subject');
 
 // Fetch unique timepoint values from the temporal column via pframe driver
 const timepointValues = ref<string[]>([]);
@@ -90,7 +90,7 @@ watch(
         colData.data
           .filter((v): v is string | number => v != null)
           .map(String),
-      )].sort();
+      )].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
       timepointValues.value = unique;
     } catch {
       timepointValues.value = [];
@@ -100,32 +100,32 @@ watch(
 );
 
 const availableTimepointsToAdd = computed(() => {
-  const current = new Set(app.model.args.timepointOrder);
+  const current = new Set(app.model.data.timepointOrder);
   return timepointValues.value.filter((v: string) => !current.has(v));
 });
 
 const resetTimepointOrder = () => {
   if (timepointValues.value.length) {
-    app.model.args.timepointOrder = [...timepointValues.value];
+    app.model.data.timepointOrder = [...timepointValues.value];
   }
 };
 
 // Auto-populate timepoint order when temporal column changes
-const temporalSyncCol = ref<string | undefined>(app.model.args.temporalColumnRef);
+const temporalSyncCol = ref<string | undefined>(app.model.data.temporalColumnRef);
 watchEffect(() => {
-  const col = app.model.args.temporalColumnRef;
+  const col = app.model.data.temporalColumnRef;
   const vals = timepointValues.value;
 
   if (vals && vals.length > 0) {
-    const current = app.model.args.timepointOrder;
+    const current = app.model.data.timepointOrder;
     const valSet = new Set(vals);
     const hasInvalidItems = current.some((v: string) => !valSet.has(v));
 
     if (col !== temporalSyncCol.value || current.length === 0) {
-      app.model.args.timepointOrder = [...vals];
+      app.model.data.timepointOrder = [...vals];
       temporalSyncCol.value = col;
     } else if (hasInvalidItems) {
-      app.model.args.timepointOrder = current.filter((v: string) => valSet.has(v));
+      app.model.data.timepointOrder = current.filter((v: string) => valSet.has(v));
     }
   }
 });
@@ -136,8 +136,8 @@ const isAdvancedOpen = ref(false);
 
 <template>
   <PlBlockPage
-    v-model:subtitle="app.model.args.customBlockLabel"
-    :subtitle-placeholder="app.model.args.defaultBlockLabel"
+    v-model:subtitle="app.model.data.customBlockLabel"
+    :subtitle-placeholder="app.model.data.defaultBlockLabel"
     title="Clonotype Distribution"
   >
     <template #append>
@@ -150,7 +150,7 @@ const isAdvancedOpen = ref(false);
     </template>
 
     <PlAgDataTableV2
-      v-model="app.model.ui.tableState"
+      v-model="app.model.data.tableState"
       :settings="tableSettings"
       not-ready-text="Data is not computed"
       show-export-button
@@ -162,7 +162,7 @@ const isAdvancedOpen = ref(false);
     <template #title>Settings</template>
 
     <PlDropdownRef
-      v-model="app.model.args.abundanceRef"
+      v-model="app.model.data.abundanceRef"
       :options="app.model.outputs.abundanceOptions"
       label="Select abundance"
       clearable
@@ -171,13 +171,13 @@ const isAdvancedOpen = ref(false);
     />
 
     <PlBtnGroup
-      v-model="app.model.args.calculationMode"
+      v-model="app.model.data.calculationMode"
       :options="calculationModeOptions"
       label="Calculation mode"
     />
 
     <PlDropdown
-      v-model="app.model.args.subjectColumnRef"
+      v-model="app.model.data.subjectColumnRef"
       :options="app.model.outputs.metadataOptions"
       label="Subject variable"
       :required="subjectRequired"
@@ -190,7 +190,7 @@ const isAdvancedOpen = ref(false);
     </PlDropdown>
 
     <PlDropdown
-      v-model="app.model.args.groupingColumnRef"
+      v-model="app.model.data.groupingColumnRef"
       :options="app.model.outputs.metadataOptions"
       label="Grouping variable"
       clearable
@@ -202,7 +202,7 @@ const isAdvancedOpen = ref(false);
     </PlDropdown>
 
     <PlDropdown
-      v-model="app.model.args.temporalColumnRef"
+      v-model="app.model.data.temporalColumnRef"
       :options="app.model.outputs.metadataOptions"
       label="Temporal variable"
       clearable
@@ -216,7 +216,7 @@ const isAdvancedOpen = ref(false);
 
     <PlAccordion multiple>
       <PlAccordionSection
-        v-if="app.model.args.temporalColumnRef"
+        v-if="app.model.data.temporalColumnRef"
         v-model="isTimepointOrderOpen"
         label="Timepoint order"
       >
@@ -234,7 +234,7 @@ const isAdvancedOpen = ref(false);
             </template>
           </PlTooltip>
         </div>
-        <PlElementList v-model:items="app.model.args.timepointOrder">
+        <PlElementList v-model:items="app.model.data.timepointOrder">
           <template #item-title="{ item }">
             {{ item }}
           </template>
@@ -252,13 +252,13 @@ const isAdvancedOpen = ref(false);
 
       <PlAccordionSection v-model="isAdvancedOpen" label="Advanced settings">
         <PlBtnGroup
-          v-model="app.model.args.normalization"
+          v-model="app.model.data.normalization"
           :options="normalizationOptions"
           label="Normalization"
         />
 
         <PlNumberField
-          v-model="app.model.args.minAbundanceThreshold"
+          v-model="app.model.data.minAbundanceThreshold"
           label="Min abundance threshold"
           :min-value="0"
           :step="1"
@@ -270,7 +270,7 @@ const isAdvancedOpen = ref(false);
         </PlNumberField>
 
         <PlNumberField
-          v-model="app.model.args.minSubjectCount"
+          v-model="app.model.data.minSubjectCount"
           label="Min subject count"
           :min-value="1"
           :step="1"
@@ -282,7 +282,7 @@ const isAdvancedOpen = ref(false);
         </PlNumberField>
 
         <PlNumberField
-          v-model="app.model.args.topN"
+          v-model="app.model.data.topN"
           label="Top N clones (temporal plot)"
           :min-value="1"
           :step="1"
@@ -294,7 +294,7 @@ const isAdvancedOpen = ref(false);
         </PlNumberField>
 
         <PlNumberField
-          v-model="app.model.args.presenceThreshold"
+          v-model="app.model.data.presenceThreshold"
           label="Presence threshold"
           :min-value="0"
           :max-value="1"
