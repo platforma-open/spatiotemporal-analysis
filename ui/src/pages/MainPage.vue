@@ -308,7 +308,6 @@ const isAdvancedOpen = ref(false);
             Default 0 means any detection counts.
           </template>
         </PlNumberField>
-
       </PlAccordionSection>
     </PlAccordion>
   </PlSlideModal>
