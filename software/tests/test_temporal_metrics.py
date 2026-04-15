@@ -133,12 +133,30 @@ class TestComputeTemporalMetrics:
     def _make_df(self, rows: list[dict]) -> pl.DataFrame:
         return pl.DataFrame(rows)
 
+    # R7: deselected timepoints (not in timepoint_order) excluded from computation
+    def test_deselected_timepoints_excluded(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.5, "timepoint": "Day7"},
+            {"sampleId": "s3", "elementId": "a", "frequency": 0.8, "timepoint": "Day14"},
+        ])
+        # Only Day0 and Day14 selected (Day7 deselected)
+        result, _ = compute_temporal_metrics(
+            df, ["Day0", "Day14"], has_subject=False, mode="population", min_subject_count=1
+        )
+        row = result.row(0, named=True)
+        # Day7 data must not participate in computation
+        # Peak is Day14 (0.8 > 0.2), Log2KD = log2(0.8/0.2)
+        assert row["peakTimepoint"] == "Day14"
+        assert row["log2KineticDelta"] == pytest.approx(math.log2(0.8 / 0.2))
+        assert row["log2PeakDelta"] == pytest.approx(math.log2(0.8 / 0.2))
+
     # R15 edge: T=1 → returns empty DataFrame (metrics not computed)
     def test_single_timepoint_returns_empty(self):
         df = self._make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.5, "timepoint": "Day0"},
         ])
-        result = compute_temporal_metrics(df, ["Day0"], has_subject=False, mode="population", min_subject_count=2)
+        result, _ = compute_temporal_metrics(df, ["Day0"], has_subject=False, mode="population", min_subject_count=2)
         assert result.is_empty()
 
     # Population mode: averages frequency across subjects per timepoint
@@ -149,7 +167,7 @@ class TestComputeTemporalMetrics:
             {"sampleId": "s3", "elementId": "a", "frequency": 0.6, "timepoint": "Day7", "subject": "sub1"},
             {"sampleId": "s4", "elementId": "a", "frequency": 0.8, "timepoint": "Day7", "subject": "sub2"},
         ])
-        result = compute_temporal_metrics(
+        result, _ = compute_temporal_metrics(
             df, ["Day0", "Day7"], has_subject=True, mode="population", min_subject_count=1
         )
         assert len(result) == 1
@@ -167,7 +185,7 @@ class TestComputeTemporalMetrics:
             {"sampleId": "s3", "elementId": "a", "frequency": 0.3, "timepoint": "Day0", "subject": "sub2"},
             {"sampleId": "s4", "elementId": "a", "frequency": 0.7, "timepoint": "Day7", "subject": "sub2"},
         ])
-        result = compute_temporal_metrics(
+        result, _ = compute_temporal_metrics(
             df, ["Day0", "Day7"], has_subject=True, mode="intra-subject", min_subject_count=1
         )
         assert len(result) == 1
@@ -185,7 +203,7 @@ class TestComputeTemporalMetrics:
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0", "subject": "sub1"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.8, "timepoint": "Day7", "subject": "sub1"},
         ])
-        result = compute_temporal_metrics(
+        result, _ = compute_temporal_metrics(
             df, ["Day0", "Day7"], has_subject=True, mode="intra-subject", min_subject_count=2
         )
         row = result.row(0, named=True)
@@ -193,6 +211,50 @@ class TestComputeTemporalMetrics:
         assert math.isnan(row["temporalShiftIndex"])
         assert math.isnan(row["log2PeakDelta"])
         assert math.isnan(row["log2KineticDelta"])
+
+    # R3: per-subject detail DataFrame returned in intra-subject mode
+    def test_per_subject_returned_in_intra_subject_mode(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.1, "timepoint": "Day0", "subject": "sub1"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.9, "timepoint": "Day7", "subject": "sub1"},
+            {"sampleId": "s3", "elementId": "a", "frequency": 0.3, "timepoint": "Day0", "subject": "sub2"},
+            {"sampleId": "s4", "elementId": "a", "frequency": 0.7, "timepoint": "Day7", "subject": "sub2"},
+        ])
+        result, per_subject = compute_temporal_metrics(
+            df, ["Day0", "Day7"], has_subject=True, mode="intra-subject", min_subject_count=1
+        )
+        assert per_subject is not None
+        assert len(per_subject) == 2  # 1 element x 2 subjects
+        assert "elementId" in per_subject.columns
+        assert "subject" in per_subject.columns
+        assert "peakTimepoint" in per_subject.columns
+        assert "temporalShiftIndex" in per_subject.columns
+        assert "log2PeakDelta" in per_subject.columns
+        assert "log2KineticDelta" in per_subject.columns
+        subs = sorted(per_subject["subject"].to_list())
+        assert subs == ["sub1", "sub2"]
+
+    # Population mode: per_subject is None (not computed)
+    def test_per_subject_none_in_population_mode(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0", "subject": "sub1"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.8, "timepoint": "Day7", "subject": "sub1"},
+        ])
+        result, per_subject = compute_temporal_metrics(
+            df, ["Day0", "Day7"], has_subject=True, mode="population", min_subject_count=1
+        )
+        assert per_subject is None
+
+    # No subject → per_subject is None
+    def test_per_subject_none_when_no_subject(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.8, "timepoint": "Day7"},
+        ])
+        result, per_subject = compute_temporal_metrics(
+            df, ["Day0", "Day7"], has_subject=False, mode="population", min_subject_count=1
+        )
+        assert per_subject is None
 
     # Multiple elements: each computed independently
     def test_multiple_elements(self):
@@ -202,7 +264,7 @@ class TestComputeTemporalMetrics:
             {"sampleId": "s2", "elementId": "a", "frequency": 0.9, "timepoint": "Day7"},
             {"sampleId": "s2", "elementId": "b", "frequency": 0.1, "timepoint": "Day7"},
         ])
-        result = compute_temporal_metrics(
+        result, _ = compute_temporal_metrics(
             df, ["Day0", "Day7"], has_subject=False, mode="population", min_subject_count=1
         )
         assert len(result) == 2

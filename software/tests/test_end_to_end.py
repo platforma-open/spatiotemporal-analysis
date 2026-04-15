@@ -64,13 +64,13 @@ def _run_pipeline(
         results["histogram"] = build_prevalence_histogram(prevalence)
 
     if has_grouping:
-        grouping = compute_grouping_metrics(df, has_subject, "population", presence_threshold, min_subject_count)
+        grouping, _ = compute_grouping_metrics(df, has_subject, "population", presence_threshold, min_subject_count)
         results["grouping"] = grouping
         if len(grouping) > 0:
             results["heatmap"] = build_heatmap_data(df, grouping, top_n)
 
     if has_timepoint and len(timepoint_order) >= 2:
-        temporal = compute_temporal_metrics(df, timepoint_order, has_subject, "population", min_subject_count)
+        temporal, _ = compute_temporal_metrics(df, timepoint_order, has_subject, "population", min_subject_count)
         results["temporal"] = temporal
         results["temporal_line"] = build_temporal_line_data(df, timepoint_order, top_n)
 

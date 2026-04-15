@@ -106,6 +106,12 @@ wf.body(func(args) {
 			saveFile("result_temporal_line.csv")
 	}
 
+	// R3: per-subject detail export (intra-subject mode with subject)
+	hasPerSubject := mode == "intra-subject" && hasSubject && (hasGrouping || (hasTimepoint && len(args.timepointOrder) >= 2))
+	if hasPerSubject {
+		runAnalysis = runAnalysis.saveFile("result_per_subject.csv")
+	}
+
 	runAnalysis = runAnalysis.
 		//printErrStreamToStdout(). <- do not save stdout content as it is unused 
 		//saveStdoutContent(). to prevent CID conflicts
@@ -429,6 +435,122 @@ wf.body(func(args) {
 		}, {cpu: 1, mem: "8GiB"})
 	}
 
+	// R3: per-subject detail PFrame (axes: [elementId, subject])
+	perSubjectPf := undefined
+	if hasPerSubject {
+		perSubjectDomain := {
+			"pl7.app/vdj/spatiotemporalAnalysis/level": "per-subject",
+			"pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId
+		}
+
+		perSubjectColumns := []
+
+		if hasGrouping {
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "ri", id: "perSubjectRi",
+				spec: {
+					name: "pl7.app/vdj/restrictionIndex", valueType: "Double",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Restriction Index (per subject)",
+						"pl7.app/format": ".3f"
+					}
+				}
+			})
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "dominant", id: "perSubjectDominant",
+				spec: {
+					name: "pl7.app/vdj/dominantGroup", valueType: "String",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Dominant Group (per subject)"
+					}
+				}
+			})
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "breadth", id: "perSubjectBreadth",
+				spec: {
+					name: "pl7.app/vdj/breadth", valueType: "Int",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Breadth (per subject)"
+					}
+				}
+			})
+		}
+
+		if hasTimepoint && len(args.timepointOrder) >= 2 {
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "peakTimepoint", id: "perSubjectPeakTimepoint",
+				spec: {
+					name: "pl7.app/vdj/peakTimepoint", valueType: "String",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Peak Timepoint (per subject)"
+					}
+				}
+			})
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "temporalShiftIndex", id: "perSubjectTemporalShiftIndex",
+				spec: {
+					name: "pl7.app/vdj/temporalShiftIndex", valueType: "Double",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Temporal Shift Index (per subject)",
+						"pl7.app/format": ".3f"
+					}
+				}
+			})
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "log2PeakDelta", id: "perSubjectLog2PeakDelta",
+				spec: {
+					name: "pl7.app/vdj/log2PeakDelta", valueType: "Double",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Log2 Peak Delta (per subject)",
+						"pl7.app/format": ".2f"
+					}
+				}
+			})
+			perSubjectColumns = append(perSubjectColumns, {
+				column: "log2KineticDelta", id: "perSubjectLog2KineticDelta",
+				spec: {
+					name: "pl7.app/vdj/log2KineticDelta", valueType: "Double",
+					domain: perSubjectDomain,
+					annotations: {
+						"pl7.app/label": "Log2 Kinetic Delta (per subject)",
+						"pl7.app/format": ".2f"
+					}
+				}
+			})
+		}
+
+		perSubjectCsv := runAnalysis.getFile("result_per_subject.csv")
+		perSubjectPfRaw := xsv.importFile(perSubjectCsv, "csv", {
+			axes: [
+				{column: "elementId", spec: elementAxisSpec},
+				{column: "subject", spec: {
+					name: "pl7.app/vdj/spatiotemporalAnalysis/subject",
+					type: "String",
+					annotations: {"pl7.app/label": "Subject"}
+				}}
+			],
+			columns: perSubjectColumns,
+			storageFormat: "Parquet",
+			partitionKeyLength: 0
+		}, {cpu: 1, mem: "8GiB"})
+
+		perSubjectPfBuilder := pframes.pFrameBuilder()
+		for k, v in perSubjectPfRaw {
+			if text.has_suffix(k, ".spec") {
+				dataKey := text.replace(k, ".spec", ".data", 1)
+				colId := text.replace(k, ".spec", "", 1)
+				perSubjectPfBuilder.add(colId, trace.inject(v), perSubjectPfRaw[dataKey])
+			}
+		}
+		perSubjectPf = perSubjectPfBuilder.build()
+	}
+
 	outputs := {
 		mainPf: pframes.exportFrame(mainPf)
 	}
@@ -440,6 +562,9 @@ wf.body(func(args) {
 	}
 	if temporalLinePf != undefined {
 		outputs.temporalLinePf = pframes.exportFrame(temporalLinePf)
+	}
+	if perSubjectPf != undefined {
+		outputs.perSubjectPf = pframes.exportFrame(perSubjectPf)
 	}
 
 	return {

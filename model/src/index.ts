@@ -237,6 +237,26 @@ export const model = BlockModelV3.create(dataModel)
     }
   })
 
+  // R3: Per-subject detail PFrame (intra-subject mode with subject variable)
+  .outputWithStatus('perSubjectPf', (ctx): PFrameHandle | undefined => {
+    if (ctx.data.calculationMode !== 'intra-subject' || ctx.data.subjectColumnRef === undefined) return undefined;
+    try {
+      const pCols = ctx.outputs?.resolve('perSubjectPf')?.getPColumns();
+      if (pCols === undefined) return undefined;
+      return createPFrameForGraphs(ctx, pCols);
+    } catch {
+      return undefined;
+    }
+  })
+  .output('perSubjectPCols', (ctx) => {
+    if (ctx.data.calculationMode !== 'intra-subject' || ctx.data.subjectColumnRef === undefined) return undefined;
+    try {
+      return ctx.outputs?.resolve('perSubjectPf')?.getPColumns();
+    } catch {
+      return undefined;
+    }
+  })
+
   .output('isRunning', (ctx) => ctx.outputs?.getIsReadyOrError() === false)
 
   .title(() => 'Clonotype Distribution')

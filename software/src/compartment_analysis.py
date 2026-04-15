@@ -175,24 +175,40 @@ def compute_grouping_metrics(
     mode: str,
     presence_threshold: float,
     min_subject_count: int,
-) -> pl.DataFrame:
-    """Compute RI, dominant group, breadth for the grouping variable."""
+) -> tuple[pl.DataFrame, pl.DataFrame | None]:
+    """Compute RI, dominant group, breadth for the grouping variable.
+
+    R3: Returns (aggregated_metrics, per_subject_metrics_or_none).
+    per_subject_metrics holds [elementId, subject, ri, dominant, breadth] for
+    Table-block inspection. It is None when has_subject=False or no data.
+    """
     # Exclude samples with missing grouping
     df = df.filter(pl.col(COL_GROUPING).is_not_null() & (pl.col(COL_GROUPING) != ""))
     categories = sorted(df[COL_GROUPING].unique().to_list())
 
     if len(categories) == 0:
-        return pl.DataFrame()
+        return pl.DataFrame(), None
 
     if not has_subject:
         # No subject: treat all samples as pooled
-        return _compute_pooled_grouping(df, categories, presence_threshold).sort("elementId")
+        return _compute_pooled_grouping(df, categories, presence_threshold).sort("elementId"), None
 
     per_subject_grouping = df.group_by(["elementId", COL_SUBJECT, COL_GROUPING]).agg(
         pl.col("frequency").mean().alias("meanFreq")
     )
 
     per_subject_metrics = _compute_per_subject_grouping(per_subject_grouping, categories, presence_threshold)
+    per_subject_out = (
+        per_subject_metrics.sort(["elementId", COL_SUBJECT]) if len(per_subject_metrics) > 0 else None
+    )
+
+    # Pre-compute per-element per-group mean frequency across subjects for consensus tie-breaking (R18)
+    per_element_group_freq = per_subject_grouping.group_by(["elementId", COL_GROUPING]).agg(
+        pl.col("meanFreq").mean().alias("meanFreq")
+    )
+    element_freqs: dict[str, dict[str, float]] = {}
+    for row in per_element_group_freq.iter_rows(named=True):
+        element_freqs.setdefault(row["elementId"], {})[row[COL_GROUPING]] = row["meanFreq"]
 
     results = []
     for element_id, group in per_subject_metrics.group_by("elementId"):
@@ -205,8 +221,8 @@ def compute_grouping_metrics(
         mean_ri = float(np.mean(ris)) if enough_subjects and len(ris) > 0 else float("nan")
         std_ri = float(np.std(ris, ddof=1)) if enough_subjects and len(ris) > 1 else float("nan")
 
-        # Consensus dominant: mode, ties broken alphabetically
-        consensus_dominant = _consensus_dominant(dominants)
+        # Consensus dominant: mode, ties broken by highest mean frequency (R18)
+        consensus_dominant = _consensus_dominant(dominants, element_freqs.get(eid))
 
         # Count dominant per category
         count_dominant = {cat: 0 for cat in categories}
@@ -232,8 +248,8 @@ def compute_grouping_metrics(
         results.append(row)
 
     if not results:
-        return pl.DataFrame()
-    return pl.DataFrame(results).sort("elementId")
+        return pl.DataFrame(), per_subject_out
+    return pl.DataFrame(results).sort("elementId"), per_subject_out
 
 
 def _compute_pooled_grouping(
@@ -250,8 +266,13 @@ def _compute_pooled_grouping(
         freq_arr = np.array([freq_map.get(cat, 0.0) for cat in categories])
 
         ri = restriction_index(freq_arr)
-        dominant_idx = int(np.argmax(freq_arr))
-        dominant = categories[dominant_idx] if freq_arr[dominant_idx] > 0 else None
+        # R12: dominant is argmax with alphabetical tie-breaking
+        max_freq = float(freq_arr.max()) if len(freq_arr) > 0 else 0.0
+        if max_freq > 0:
+            tied = [categories[i] for i in range(len(categories)) if freq_arr[i] == max_freq]
+            dominant = sorted(tied)[0]
+        else:
+            dominant = None
         breadth = int(np.sum(freq_arr > presence_threshold))
 
         results.append(
@@ -304,8 +325,11 @@ def _compute_per_subject_grouping(
     return pl.DataFrame(results)
 
 
-def _consensus_dominant(dominants: list) -> str | None:
-    """Mode of dominants, ties broken alphabetically."""
+def _consensus_dominant(
+    dominants: list,
+    group_mean_freqs: dict[str, float] | None = None,
+) -> str | None:
+    """Mode of dominants. R18: ties broken by highest mean frequency, then alphabetically."""
     dom_counts: dict[str, int] = {}
     for d in dominants:
         if d is not None:
@@ -313,8 +337,14 @@ def _consensus_dominant(dominants: list) -> str | None:
     if not dom_counts:
         return None
     max_count = max(dom_counts.values())
-    tied = sorted(k for k, v in dom_counts.items() if v == max_count)
-    return tied[0]
+    tied = [k for k, v in dom_counts.items() if v == max_count]
+    if len(tied) == 1:
+        return tied[0]
+    # Tie-break: highest mean frequency (R18), then alphabetical as final fallback
+    if group_mean_freqs:
+        tied.sort(key=lambda g: (-group_mean_freqs.get(g, 0.0), g))
+        return tied[0]
+    return sorted(tied)[0]
 
 
 def compute_temporal_metrics(
@@ -323,13 +353,17 @@ def compute_temporal_metrics(
     has_subject: bool,
     mode: str,
     min_subject_count: int,
-) -> pl.DataFrame:
+) -> tuple[pl.DataFrame, pl.DataFrame | None]:
     """Compute peak timepoint, TSI, log2 kinetic delta, log2 peak delta.
 
     Fold-changes use standard frequencies at detected timepoints (always nonzero).
+
+    R3: Returns (aggregated_metrics, per_subject_metrics_or_none). per_subject
+    metrics hold per-(elementId, subject) temporal values for Table-block
+    inspection and are returned only in intra-subject mode with has_subject.
     """
     if len(timepoint_order) < 2:
-        return pl.DataFrame()
+        return pl.DataFrame(), None
 
     # Exclude samples with missing timepoint
     df = df.filter(pl.col(COL_TIMEPOINT).is_not_null() & (pl.col(COL_TIMEPOINT) != ""))
@@ -348,8 +382,8 @@ def compute_temporal_metrics(
             results.append(row)
 
         if not results:
-            return pl.DataFrame()
-        return pl.DataFrame(results).sort("elementId")
+            return pl.DataFrame(), None
+        return pl.DataFrame(results).sort("elementId"), None
 
     else:
         # Intra-subject: per-subject metrics then average
@@ -366,9 +400,9 @@ def compute_temporal_metrics(
             per_subject_temporal.append(row)
 
         if not per_subject_temporal:
-            return pl.DataFrame()
+            return pl.DataFrame(), None
 
-        ps_df = pl.DataFrame(per_subject_temporal)
+        ps_df = pl.DataFrame(per_subject_temporal).sort(["elementId", COL_SUBJECT])
         results = []
         for element_id, group in ps_df.group_by("elementId"):
             eid = element_id[0] if isinstance(element_id, tuple) else element_id
@@ -387,8 +421,8 @@ def compute_temporal_metrics(
             results.append(row)
 
         if not results:
-            return pl.DataFrame()
-        return pl.DataFrame(results).sort("elementId")
+            return pl.DataFrame(), ps_df
+        return pl.DataFrame(results).sort("elementId"), ps_df
 
 
 def _compute_temporal_for_element(
@@ -579,8 +613,11 @@ def main():
 
     # Grouping metrics
     grouping = None
+    per_subject_grouping = None
     if args.has_grouping:
-        grouping = compute_grouping_metrics(df, has_subject, mode, args.presence_threshold, args.min_subject_count)
+        grouping, per_subject_grouping = compute_grouping_metrics(
+            df, has_subject, mode, args.presence_threshold, args.min_subject_count
+        )
         if len(grouping) > 0:
             grouping.write_csv(f"{prefix}_grouping.csv")
 
@@ -591,14 +628,33 @@ def main():
             heatmap.write_csv(f"{prefix}_heatmap.csv")
 
     # Temporal metrics
+    per_subject_temporal = None
     if args.has_timepoint and len(timepoint_order) >= 2:
-        temporal = compute_temporal_metrics(df, timepoint_order, has_subject, mode, args.min_subject_count)
+        temporal, per_subject_temporal = compute_temporal_metrics(
+            df, timepoint_order, has_subject, mode, args.min_subject_count
+        )
         if len(temporal) > 0:
             temporal.write_csv(f"{prefix}_temporal.csv")
 
         line_data = build_temporal_line_data(df, timepoint_order, args.top_n)
         if len(line_data) > 0:
             line_data.write_csv(f"{prefix}_temporal_line.csv")
+
+    # R3: Per-subject detail export — only in intra-subject mode with subject
+    if mode == "intra-subject" and has_subject:
+        per_subject = None
+        if per_subject_grouping is not None and len(per_subject_grouping) > 0:
+            per_subject = per_subject_grouping
+        if per_subject_temporal is not None and len(per_subject_temporal) > 0:
+            if per_subject is None:
+                per_subject = per_subject_temporal
+            else:
+                per_subject = per_subject.join(
+                    per_subject_temporal, on=["elementId", COL_SUBJECT], how="full", coalesce=True
+                )
+        if per_subject is not None and len(per_subject) > 0:
+            per_subject = per_subject.sort(["elementId", COL_SUBJECT])
+            per_subject.write_csv(f"{prefix}_per_subject.csv")
 
     # Combined main table — start from prevalence if available, else unique elementIds
     if prevalence is not None:

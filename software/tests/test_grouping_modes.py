@@ -41,7 +41,7 @@ class TestPooledGrouping:
         result = _compute_pooled_grouping(df, ["lung", "lymph", "spleen"], presence_threshold=0.0)
         assert result["dominant"][0] == "spleen"
 
-    # R12: tied frequencies → alphabetically first wins
+    # R12: tied frequencies → alphabetically first wins (explicit tie-breaking)
     def test_dominant_tie_alphabetical(self):
         df = pl.DataFrame({
             "elementId": ["a", "a"],
@@ -49,8 +49,17 @@ class TestPooledGrouping:
             "frequency": [0.5, 0.5],
         })
         result = _compute_pooled_grouping(df, ["alpha", "zeta"], presence_threshold=0.0)
-        # Both have 0.5 — numpy argmax picks first in array order, which is "alpha"
-        # since categories are sorted
+        assert result["dominant"][0] == "alpha"
+
+    # R12: tie-breaking is explicit alphabetical — not dependent on categories list order
+    def test_dominant_tie_alphabetical_unsorted_categories(self):
+        df = pl.DataFrame({
+            "elementId": ["a", "a"],
+            "grouping": ["zeta", "alpha"],
+            "frequency": [0.5, 0.5],
+        })
+        # Pass categories in reverse alphabetical order — alpha should still win
+        result = _compute_pooled_grouping(df, ["zeta", "alpha"], presence_threshold=0.0)
         assert result["dominant"][0] == "alpha"
 
     # R13: breadth counts groups above presence threshold
@@ -110,13 +119,24 @@ class TestPerSubjectGrouping:
 class TestConsensusDominant:
     """Tests for _consensus_dominant — R18."""
 
-    # Mode of dominants
+    # Mode of dominants (no tie)
     def test_mode_is_consensus(self):
         assert _consensus_dominant(["lung", "lung", "spleen"]) == "lung"
 
-    # Tie broken alphabetically (spec says by highest mean frequency,
-    # but implementation uses alphabetical — testing current behavior)
-    def test_tie_broken_alphabetically(self):
+    # R18: tie broken by highest mean frequency across subjects
+    def test_tie_broken_by_frequency(self):
+        # spleen and lung each dominant once → count tie
+        # spleen has higher mean frequency → wins
+        group_mean_freqs = {"lung": 0.3, "spleen": 0.7}
+        assert _consensus_dominant(["spleen", "lung"], group_mean_freqs) == "spleen"
+
+    # R18: ties with equal mean frequency → alphabetical fallback
+    def test_tie_broken_alphabetically_when_equal_freqs(self):
+        group_mean_freqs = {"lung": 0.5, "spleen": 0.5}
+        assert _consensus_dominant(["spleen", "lung"], group_mean_freqs) == "lung"
+
+    # Fallback: no frequencies provided → alphabetical
+    def test_tie_broken_alphabetically_without_freqs(self):
         assert _consensus_dominant(["spleen", "lung"]) == "lung"
 
     # All None → None
@@ -144,7 +164,7 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s1", "elementId": "a", "frequency": 0.6, "grouping": "lung"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.4, "grouping": "spleen"},
         ])
-        result = compute_grouping_metrics(df, has_subject=False, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=False, mode="population",
                                           presence_threshold=0.0, min_subject_count=2)
         assert len(result) == 1
         assert "ri" in result.columns
@@ -159,7 +179,7 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s2", "elementId": "a", "frequency": 0.7, "grouping": "lung", "subject": "sub2"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.3, "grouping": "spleen", "subject": "sub2"},
         ])
-        result = compute_grouping_metrics(df, has_subject=True, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=True, mode="population",
                                           presence_threshold=0.0, min_subject_count=1)
         assert "consensusDominant" in result.columns
         assert "meanRi" in result.columns
@@ -175,7 +195,7 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s2", "elementId": "a", "frequency": 0.5, "grouping": "lung", "subject": "sub2"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.5, "grouping": "spleen", "subject": "sub2"},
         ])
-        result = compute_grouping_metrics(df, has_subject=True, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=True, mode="population",
                                           presence_threshold=0.0, min_subject_count=1)
         row = result.row(0, named=True)
         # Sub1 RI > 0, Sub2 RI = 0 → mean should be between 0 and sub1's RI
@@ -187,7 +207,7 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s1", "elementId": "a", "frequency": 0.8, "grouping": "lung", "subject": "sub1"},
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "grouping": "spleen", "subject": "sub1"},
         ])
-        result = compute_grouping_metrics(df, has_subject=True, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=True, mode="population",
                                           presence_threshold=0.0, min_subject_count=2)
         row = result.row(0, named=True)
         assert math.isnan(row["meanRi"])
@@ -199,10 +219,27 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s1", "elementId": "a", "frequency": 0.8, "grouping": "lung", "subject": "sub1"},
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "grouping": "spleen", "subject": "sub1"},
         ])
-        result = compute_grouping_metrics(df, has_subject=True, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=True, mode="population",
                                           presence_threshold=0.0, min_subject_count=1)
         row = result.row(0, named=True)
         assert math.isnan(row["stdRi"])
+
+    # R18: consensus dominant tie broken by highest mean frequency across subjects
+    def test_consensus_dominant_tie_broken_by_frequency(self):
+        # 2 subjects: sub1 dominant=lung, sub2 dominant=spleen → 1-1 count tie
+        # lung mean freq across subjects = (0.9 + 0.4) / 2 = 0.65
+        # spleen mean freq across subjects = (0.1 + 0.6) / 2 = 0.35
+        # lung has higher mean frequency → consensus = lung
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.9, "grouping": "lung", "subject": "sub1"},
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.1, "grouping": "spleen", "subject": "sub1"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.4, "grouping": "lung", "subject": "sub2"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.6, "grouping": "spleen", "subject": "sub2"},
+        ])
+        result, _ = compute_grouping_metrics(df, has_subject=True, mode="population",
+                                          presence_threshold=0.0, min_subject_count=1)
+        row = result.row(0, named=True)
+        assert row["consensusDominant"] == "lung"
 
     # R19: count dominant per category
     def test_count_dominant_in(self):
@@ -214,12 +251,56 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s3", "elementId": "a", "frequency": 0.8, "grouping": "lung", "subject": "sub3"},
             {"sampleId": "s3", "elementId": "a", "frequency": 0.2, "grouping": "spleen", "subject": "sub3"},
         ])
-        result = compute_grouping_metrics(df, has_subject=True, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=True, mode="population",
                                           presence_threshold=0.0, min_subject_count=1)
         row = result.row(0, named=True)
         # Sub1: lung dominant, Sub2: spleen dominant, Sub3: lung dominant
         assert row["countDominantIn_lung"] == 2
         assert row["countDominantIn_spleen"] == 1
+
+    # R3: per-subject detail DataFrame returned in intra-subject mode with subject
+    def test_per_subject_returned_with_subject(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.8, "grouping": "lung", "subject": "sub1"},
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "grouping": "spleen", "subject": "sub1"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.3, "grouping": "lung", "subject": "sub2"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.7, "grouping": "spleen", "subject": "sub2"},
+        ])
+        result, per_subject = compute_grouping_metrics(df, has_subject=True, mode="intra-subject",
+                                          presence_threshold=0.0, min_subject_count=1)
+        assert per_subject is not None
+        assert len(per_subject) == 2  # 1 element x 2 subjects
+        assert "elementId" in per_subject.columns
+        assert "subject" in per_subject.columns
+        assert "ri" in per_subject.columns
+        assert "dominant" in per_subject.columns
+        assert "breadth" in per_subject.columns
+        subs = sorted(per_subject["subject"].to_list())
+        assert subs == ["sub1", "sub2"]
+
+    # R3: population mode with subject also returns per-subject detail (intermediate)
+    def test_per_subject_returned_in_population_mode_with_subject(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.8, "grouping": "lung", "subject": "sub1"},
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "grouping": "spleen", "subject": "sub1"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.3, "grouping": "lung", "subject": "sub2"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.7, "grouping": "spleen", "subject": "sub2"},
+        ])
+        result, per_subject = compute_grouping_metrics(df, has_subject=True, mode="population",
+                                          presence_threshold=0.0, min_subject_count=1)
+        # Even in population mode, per-subject metrics exist as intermediate
+        assert per_subject is not None
+        assert len(per_subject) == 2
+
+    # No subject → per_subject is None
+    def test_per_subject_none_when_no_subject(self):
+        df = self._make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.6, "grouping": "lung"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.4, "grouping": "spleen"},
+        ])
+        result, per_subject = compute_grouping_metrics(df, has_subject=False, mode="population",
+                                          presence_threshold=0.0, min_subject_count=1)
+        assert per_subject is None
 
     # Empty grouping values are excluded
     def test_empty_grouping_excluded(self):
@@ -227,7 +308,7 @@ class TestComputeGroupingMetrics:
             {"sampleId": "s1", "elementId": "a", "frequency": 0.5, "grouping": "lung"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.5, "grouping": ""},
         ])
-        result = compute_grouping_metrics(df, has_subject=False, mode="population",
+        result, _ = compute_grouping_metrics(df, has_subject=False, mode="population",
                                           presence_threshold=0.0, min_subject_count=1)
         row = result.row(0, named=True)
         # Only "lung" category exists → RI = 1.0
