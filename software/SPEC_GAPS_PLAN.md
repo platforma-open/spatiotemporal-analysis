@@ -7,123 +7,25 @@ The TESTING_PLAN.md identified 5 spec gaps. This plan resolves each one with cha
 
 ---
 
-## Gap 1: R6 — Multiple Grouping Variables
+## Gap 1: R6 — Multiple Grouping Variables — WON'T FIX
 
-**Spec:** `groupingVariables: GroupingVariableConfig[]` — array of grouping variables with labels. R26: "Multiple Grouping Variable configurations produce independent sets of columns, disambiguated by the variable name."
+**Spec (R6):** "Multiple Grouping Variables can be configured to compute metrics against independent categorical axes (e.g., both `Organism Part` and `Immunophenotype` in the same run)."
 
-**Current:** Single `groupingColumnRef?: SUniversalPColumnId` throughout.
+**Spec (R26):** "Multiple Compartment Variable configurations produce independent sets of columns, disambiguated by the variable name in the column label and domain."
 
-### Resolution: Python Multi-Grouping Support
+**Decision:** Intentionally out of scope. The block will support a single grouping variable only (current behavior). Users needing analysis against multiple grouping axes can run the block multiple times with different configurations — the same workaround documented in R36 for mixed experimental designs.
 
-Run one Python invocation with multiple grouping columns in the input CSV. This avoids wasteful re-reads and is compatible with vectorized optimization (N sequential pivots, or parallel pivots in one pass).
+**Rationale:**
+- Column proliferation risk flagged in spec's "Risks" section: multiple variables × per-category `Count Dominant In` columns explode the output surface.
+- UI complexity for multi-select grouping + per-variable heatmap tabs (R28) is disproportionate to the workflow benefit.
+- Single-variable runs compose cleanly via block duplication — no combinatorial explosion of domains or column labels.
 
-#### Python Changes (`compartment_analysis.py`)
+**Implications:**
+- R6, R26, R28 (tabs/facets for multi-variable heatmap) are formally descoped.
+- Current `groupingColumnRef?: SUniversalPColumnId` stays as-is. No multi-variable migration needed.
+- No domain `pl7.app/vdj/spatiotemporalAnalysis/variable` disambiguation required — all grouping columns are unambiguously the single configured variable.
 
-**New args:**
-```
---grouping-columns '["grouping_0","grouping_1"]'   # CSV column names
---grouping-labels '["Organism Part","Immunophenotype"]'  # Human-readable labels
-```
-
-Replace `--has-grouping` flag. When `--grouping-columns` is empty/absent, no grouping metrics are computed.
-
-**Processing:**
-- Loop over `(column_name, label)` pairs
-- For each: compute grouping metrics using `column_name` as the grouping column
-- Output per-variable files: `result_grouping_0.csv`, `result_heatmap_0.csv`, etc.
-- Main table: merge all grouping results, prefix column names with variable index
-  - `ri_0`, `dominant_0`, `breadth_0`, `ri_1`, `dominant_1`, `breadth_1`, ...
-  - Consensus columns (with subject): `consensusDominant_0`, `meanRi_0`, `stdRi_0`, ...
-  - CountDominantIn: `countDominantIn_0_lung`, `countDominantIn_1_CD4`, ...
-
-**Functions affected:**
-- `parse_args()` — new `--grouping-columns`, `--grouping-labels` args
-- `main()` — loop over grouping variables, merge results
-- `compute_grouping_metrics()` — accept column name parameter (currently hardcoded `COL_GROUPING`)
-- `build_heatmap_data()` — accept column name parameter
-
-**Performance note:** Each variable is an independent computation. The vectorized pivot approach from OPTIMIZATION_PLAN.md handles this naturally — one pivot per variable. With N variables and M elements, it's N pivots of M rows, each fully vectorized.
-
-#### Workflow Changes (`main.tpl.tengo`)
-
-```go
-// Build CSV: add each grouping column with indexed header
-for i, ref in args.groupingColumnRefs {
-    csvBuilder.add(columns.getColumn(ref), {header: "grouping_" + string(i)})
-}
-
-// Pass grouping info to Python
-groupingCols := []
-groupingLabels := []
-for i, ref in args.groupingColumnRefs {
-    groupingCols = append(groupingCols, "grouping_" + string(i))
-    // Label from metadata spec
-    spec := columns.getSpec(ref)
-    label := spec.annotations["pl7.app/label"]
-    if label == undefined { label = "Grouping " + string(i) }
-    groupingLabels = append(groupingLabels, label)
-}
-runAnalysis = runAnalysis.
-    arg("--grouping-columns").arg(string(json.encode(groupingCols))).
-    arg("--grouping-labels").arg(string(json.encode(groupingLabels)))
-```
-
-**PFrame construction:** For each grouping variable, create PColumn specs with variable-specific domains:
-```go
-for i, label in groupingLabels {
-    varDomain := {
-        "pl7.app/vdj/spatiotemporalAnalysis/variable": label,
-        "pl7.app/vdj/spatiotemporalAnalysis/blockId": blockId
-    }
-    // RI column for this variable
-    mainImportColumns = append(mainImportColumns, {
-        column: "ri_" + string(i),
-        spec: { name: "pl7.app/vdj/restrictionIndex", domain: varDomain,
-                annotations: {"pl7.app/label": "Restriction Index / " + label, ...} }
-    })
-    // ... same for dominant, breadth, consensus columns
-}
-```
-
-**Heatmap PFrames:** One per variable. Save each `result_heatmap_{i}.csv` and import as separate PFrame.
-
-**Output map:** Change from single `heatmapPf` to indexed: `heatmapPf_0`, `heatmapPf_1`, etc. Or use a single `heatmapPf` output key that routes to the active tab's variable.
-
-#### Model Changes (`model/src/index.ts`)
-
-```typescript
-// New type
-type BlockDataV2 = Omit<BlockData, 'groupingColumnRef'> & {
-  groupingColumnRefs: SUniversalPColumnId[];
-};
-
-// Migration from v1
-const dataModel = new DataModelBuilder()
-  .from<BlockDataV2>('v2')
-  .upgrade<BlockData>('v1', (v1) => ({
-    ...v1,
-    groupingColumnRefs: v1.groupingColumnRef ? [v1.groupingColumnRef] : [],
-  }))
-  ...
-```
-
-**Validation:** At least one of `groupingColumnRefs.length > 0` or `temporalColumnRef` required.
-
-**Outputs:** Dynamic heatmap outputs based on `groupingColumnRefs.length`.
-
-#### UI Changes (`MainPage.vue`)
-
-- Replace single `PlDropdown` for grouping with a multi-select or add/remove list
-- Pattern: "Add grouping variable" button → dropdown to select metadata column → adds to list
-- Each list item shows the column label and a remove button
-- Heatmap page: tabs per grouping variable (R28)
-
-#### Test Changes
-
-- Add tests for multi-variable grouping: 2 variables produce independent RI/dominant/breadth columns
-- Verify column naming: `ri_0`, `dominant_0`, etc.
-- Verify domain disambiguation per variable
-- Verify heatmap data generated per variable
+**If reintroduced later:** The previous plan (multi-column CSV, indexed file outputs, per-variable PFrame specs, `PlElementList`/repeatable dropdown UI, heatmap tabs) remains valid as a starting point — see git history for this file at commit `b3e21a5` or earlier.
 
 ---
 
@@ -378,27 +280,20 @@ This matches the pattern already used in `_compute_per_subject_grouping` (line 2
 
 ## Implementation Order
 
-These gaps have dependencies and should be resolved in this order:
+All gaps either resolved or descoped:
 
-| Order | Gap | Scope | Effort | Dependency |
-|-------|-----|-------|--------|------------|
-| 1 | **Gap 5** — Pooled tie-breaking | Python only | Trivial (5 lines) | None |
-| 2 | **Gap 4** — Consensus tie-breaking | Python + tests | Small (1 function + tests) | None |
-| 3 | **Gap 3** — Timepoint deselection | Tests only | Trivial (1 test) | None |
-| 4 | **Gap 2** — Per-subject detail columns | Python + workflow + model | Medium | None |
-| 5 | **Gap 1** — Multiple grouping variables | All layers | Large | Gaps 2, 4, 5 done first |
-
-### Rationale
-
-- **Gaps 5, 4, 3** are pure correctness fixes in Python. Do them first — they're small, independent, and improve the foundation before larger changes.
-- **Gap 2** adds a new output file and PFrame. Do it before Gap 1 because Gap 1's multi-variable support needs to work with per-subject detail columns too.
-- **Gap 1** is the largest change spanning all layers. Do it last after the foundation is solid.
+| Order | Gap | Status |
+|-------|-----|--------|
+| 1 | **Gap 5** — Pooled tie-breaking (R12) | RESOLVED |
+| 2 | **Gap 4** — Consensus tie-breaking (R18) | RESOLVED |
+| 3 | **Gap 3** — Timepoint deselection (R7) | RESOLVED |
+| 4 | **Gap 2** — Per-subject detail columns (R3) | RESOLVED |
+| 5 | **Gap 1** — Multiple grouping variables (R6, R26, R28 tabs) | WON'T FIX |
 
 ### Relationship to Performance Optimization
 
-All gap fixes should use the current Python loop-based architecture (not vectorized). The performance optimization in OPTIMIZATION_PLAN.md is a separate pass applied afterward. The gap fixes are designed to be compatible:
+Resolved gaps use the current Python loop-based architecture. The performance optimization in OPTIMIZATION_PLAN.md is a separate pass applied afterward. With Gap 1 descoped, the vectorization is simpler (single grouping column, no per-variable iteration):
 
-- **Gap 1 (multi-grouping):** Vectorized version processes each variable as a separate pivot — trivially parallelizable.
 - **Gap 2 (per-subject detail):** Vectorized version produces per-subject wide DataFrame as intermediate result — just save it before aggregating.
 - **Gap 4 (consensus tie-breaking):** Vectorized version can use `group_by.agg()` with a custom expression chain instead of `.mode().sort().first()`.
 - **Gap 5 (pooled tie-breaking):** Vectorized version's when/then chain in reverse-alpha order handles this automatically.
@@ -407,13 +302,11 @@ All gap fixes should use the current Python loop-based architecture (not vectori
 
 ## Files Modified Per Gap
 
-| File | Gap 1 | Gap 2 | Gap 3 | Gap 4 | Gap 5 |
-|------|-------|-------|-------|-------|-------|
-| `software/src/compartment_analysis.py` | Yes | Yes | — | Yes | Yes |
-| `workflow/src/main.tpl.tengo` | Yes | Yes | — | — | — |
-| `model/src/index.ts` | Yes | Yes | — | — | — |
-| `ui/src/pages/MainPage.vue` | Yes | — | — | — | — |
-| `ui/src/pages/HeatmapPage.vue` | Yes | — | — | — | — |
-| `software/tests/test_grouping_modes.py` | Yes | — | — | Yes | Yes |
-| `software/tests/test_temporal_metrics.py` | — | — | Yes | — | — |
-| `software/tests/test_end_to_end.py` | Yes | Yes | — | — | — |
+| File | Gap 2 | Gap 3 | Gap 4 | Gap 5 |
+|------|-------|-------|-------|-------|
+| `software/src/compartment_analysis.py` | Yes | — | Yes | Yes |
+| `workflow/src/main.tpl.tengo` | Yes | — | — | — |
+| `model/src/index.ts` | Yes | — | — | — |
+| `software/tests/test_grouping_modes.py` | Yes | — | Yes | Yes |
+| `software/tests/test_temporal_metrics.py` | Yes | Yes | — | — |
+| `software/tests/test_end_to_end.py` | Yes | — | — | — |

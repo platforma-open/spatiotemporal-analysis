@@ -145,7 +145,7 @@ Tests use `pytest` with `polars` DataFrames constructed inline. Coverage target:
 
 These are areas where the current implementation deviates from or doesn't fully cover the spec:
 
-1. **R6 — Multiple Grouping Variables:** The spec calls for multiple grouping variables (`groupingVariables: GroupingVariableConfig[]`). The implementation supports only a single `groupingColumnRef`. Not testable in current Python code — this would require workflow/model changes.
+1. **R6 / R26 / R28 tabs — Multiple Grouping Variables (WON'T FIX):** Intentionally descoped. The block supports a single `groupingColumnRef` only. Users needing analysis against multiple grouping axes run the block multiple times (same workaround as R36 for mixed experimental designs). Rationale: column proliferation risk per spec's own "Risks" section, disproportionate UI complexity, and clean composability via block duplication. No tests planned.
 
 2. **R3 — Per-subject detail columns (RESOLVED):** `compute_grouping_metrics` and `compute_temporal_metrics` now return tuples `(aggregated, per_subject)`. `main()` writes `result_per_subject.csv` in intra-subject mode with subject. Workflow builds `perSubjectPf` with axes `[elementId, subject]`. Model exposes `perSubjectPf` + `perSubjectPCols` outputs.
 
