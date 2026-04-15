@@ -5,7 +5,6 @@ Run: uv run pytest tests/test_normalization.py -v
 
 import math
 
-import numpy as np
 import polars as pl
 import pytest
 
@@ -133,22 +132,38 @@ class TestCLR:
             sample = result.filter(pl.col("sampleId") == sid)
             assert sample["frequency"].sum() == pytest.approx(0.0, abs=1e-10)
 
-    # Intra-subject mode: CLR applied independently per subject
-    def test_clr_intra_subject_is_per_subject(self):
+    # Intra-subject CLR uses per-subject min(nonzero) for zero replacement;
+    # population mode uses global min(nonzero). When a subject's own minimum
+    # differs from the global minimum, the delta applied to zero frequencies
+    # differs — so CLR output must differ between modes for that subject.
+    def test_clr_intra_subject_differs_from_population(self):
         df = pl.DataFrame({
-            "sampleId": ["s1", "s1", "s2", "s2"],
-            "elementId": ["a", "b", "a", "b"],
-            "abundance": [10.0, 90.0, 50.0, 50.0],
-            "subject": ["sub1", "sub1", "sub2", "sub2"],
+            "sampleId": ["s1", "s1", "s1", "s2", "s2", "s2"],
+            "elementId": ["a", "b", "c", "a", "b", "c"],
+            # sub1: freqs = [0.1, 0.9, 0.0]   → min_nz = 0.1
+            # sub2: freqs = [0.0, 0.5, 0.5]   → min_nz = 0.5
+            # Global min_nz = 0.1 → delta differs for sub2's zero element "a"
+            "abundance": [10.0, 90.0, 0.0, 0.0, 50.0, 50.0],
+            "subject": ["sub1", "sub1", "sub1", "sub2", "sub2", "sub2"],
         })
         result_intra = compute_clr(df, mode="intra-subject", has_subject=True)
         result_pop = compute_clr(df, mode="population", has_subject=True)
-        # In this case with no zeros and 1 sample per subject, results should
-        # actually be the same. But the code path differs — verify both run cleanly
-        # and each sample sums to ~0
-        for sid in ["s1", "s2"]:
-            sample = result_intra.filter(pl.col("sampleId") == sid)
-            assert sample["frequency"].sum() == pytest.approx(0.0, abs=1e-10)
+
+        def freq_of(result, sid, eid):
+            return result.filter(
+                (pl.col("sampleId") == sid) & (pl.col("elementId") == eid)
+            )["frequency"][0]
+
+        # sub2 element "a" was zero — its CLR value depends on delta, which
+        # differs between modes (per-subject min=0.5 vs global min=0.1)
+        assert freq_of(result_intra, "s2", "a") != pytest.approx(
+            freq_of(result_pop, "s2", "a"), abs=1e-6
+        )
+        # Both modes still produce CLR-centered output (per-sample sum ~ 0)
+        for result in (result_intra, result_pop):
+            for sid in ["s1", "s2"]:
+                sample = result.filter(pl.col("sampleId") == sid)
+                assert sample["frequency"].sum() == pytest.approx(0.0, abs=1e-10)
 
     # Multiple samples per subject in intra-subject mode
     def test_clr_intra_subject_multiple_samples(self):

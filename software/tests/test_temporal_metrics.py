@@ -5,7 +5,6 @@ Run: uv run pytest tests/test_temporal_metrics.py -v
 
 import math
 
-import numpy as np
 import polars as pl
 import pytest
 
@@ -22,6 +21,12 @@ class TestComputeTemporalForElement:
         tp_freq = {"Day0": 0.1, "Day7": 0.5, "Day14": 0.3, "Day28": 0.1}
         result = _compute_temporal_for_element("clone1", tp_freq, self.TIMEPOINTS, 4)
         assert result["peakTimepoint"] == "Day7"
+
+    # R14: tied max frequency → earliest timepoint wins (argmax first-occurrence)
+    def test_peak_tie_broken_by_earliest(self):
+        tp_freq = {"Day0": 0.5, "Day7": 0.5, "Day14": 0.0, "Day28": 0.0}
+        result = _compute_temporal_for_element("clone1", tp_freq, self.TIMEPOINTS, 4)
+        assert result["peakTimepoint"] == "Day0"
 
     # R15: all abundance at first timepoint → TSI = 0.0
     def test_tsi_all_at_first_equals_zero(self):
@@ -79,16 +84,16 @@ class TestComputeTemporalForElement:
         # Only one detected timepoint: peak == first → log2(0.3/0.3) = 0
         assert result["log2PeakDelta"] == pytest.approx(0.0)
 
-    # R16: Log2PD always >= 0 (peak >= first by definition)
-    def test_log2pd_always_non_negative(self):
-        test_cases = [
-            {"Day0": 0.1, "Day7": 0.5, "Day14": 0.2, "Day28": 0.2},
-            {"Day0": 0.5, "Day7": 0.3, "Day14": 0.1, "Day28": 0.1},
-            {"Day0": 0.0, "Day7": 0.0, "Day14": 0.0, "Day28": 0.5},
-        ]
-        for tp_freq in test_cases:
-            result = _compute_temporal_for_element("x", tp_freq, self.TIMEPOINTS, 4)
-            assert result["log2PeakDelta"] >= 0.0
+    # R16: Log2PD always >= 0 (peak >= first by definition) — parametrized so
+    # each scenario appears as its own test ID for clearer failure localization
+    @pytest.mark.parametrize("tp_freq", [
+        {"Day0": 0.1, "Day7": 0.5, "Day14": 0.2, "Day28": 0.2},  # peak mid-series
+        {"Day0": 0.5, "Day7": 0.3, "Day14": 0.1, "Day28": 0.1},  # peak at first
+        {"Day0": 0.0, "Day7": 0.0, "Day14": 0.0, "Day28": 0.5},  # peak at last
+    ])
+    def test_log2pd_always_non_negative(self, tp_freq):
+        result = _compute_temporal_for_element("x", tp_freq, self.TIMEPOINTS, 4)
+        assert result["log2PeakDelta"] >= 0.0
 
     # R16a: log2(last/first) when expanding
     def test_log2kd_expansion(self):
@@ -130,12 +135,9 @@ class TestComputeTemporalForElement:
 class TestComputeTemporalMetrics:
     """Tests for compute_temporal_metrics — population vs intra-subject modes."""
 
-    def _make_df(self, rows: list[dict]) -> pl.DataFrame:
-        return pl.DataFrame(rows)
-
     # R7: deselected timepoints (not in timepoint_order) excluded from computation
-    def test_deselected_timepoints_excluded(self):
-        df = self._make_df([
+    def test_deselected_timepoints_excluded(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.5, "timepoint": "Day7"},
             {"sampleId": "s3", "elementId": "a", "frequency": 0.8, "timepoint": "Day14"},
@@ -151,17 +153,29 @@ class TestComputeTemporalMetrics:
         assert row["log2KineticDelta"] == pytest.approx(math.log2(0.8 / 0.2))
         assert row["log2PeakDelta"] == pytest.approx(math.log2(0.8 / 0.2))
 
+    # R14: tied max frequency across timepoints → earliest timepoint wins
+    # Guards the reverse-iteration when/then chain in the vectorized path
+    def test_peak_tie_broken_by_earliest_timepoint(self, make_df):
+        df = make_df([
+            {"sampleId": "s1", "elementId": "a", "frequency": 0.5, "timepoint": "Day0"},
+            {"sampleId": "s2", "elementId": "a", "frequency": 0.5, "timepoint": "Day7"},
+        ])
+        result, _ = compute_temporal_metrics(
+            df, ["Day0", "Day7"], has_subject=False, mode="population", min_subject_count=1
+        )
+        assert result["peakTimepoint"][0] == "Day0"
+
     # R15 edge: T=1 → returns empty DataFrame (metrics not computed)
-    def test_single_timepoint_returns_empty(self):
-        df = self._make_df([
+    def test_single_timepoint_returns_empty(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.5, "timepoint": "Day0"},
         ])
         result, _ = compute_temporal_metrics(df, ["Day0"], has_subject=False, mode="population", min_subject_count=2)
         assert result.is_empty()
 
     # Population mode: averages frequency across subjects per timepoint
-    def test_population_mode_averages_across_subjects(self):
-        df = self._make_df([
+    def test_population_mode_averages_across_subjects(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0", "subject": "sub1"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.4, "timepoint": "Day0", "subject": "sub2"},
             {"sampleId": "s3", "elementId": "a", "frequency": 0.6, "timepoint": "Day7", "subject": "sub1"},
@@ -178,8 +192,8 @@ class TestComputeTemporalMetrics:
         assert row["log2PeakDelta"] == pytest.approx(math.log2(0.7 / 0.3))
 
     # Intra-subject mode: per-subject metrics then averaged
-    def test_intra_subject_computes_per_subject_then_averages(self):
-        df = self._make_df([
+    def test_intra_subject_computes_per_subject_then_averages(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.1, "timepoint": "Day0", "subject": "sub1"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.9, "timepoint": "Day7", "subject": "sub1"},
             {"sampleId": "s3", "elementId": "a", "frequency": 0.3, "timepoint": "Day0", "subject": "sub2"},
@@ -198,8 +212,8 @@ class TestComputeTemporalMetrics:
         assert row["log2PeakDelta"] == pytest.approx(expected_avg, abs=1e-6)
 
     # R17b: intra-subject temporal metrics NaN below minSubjectCount
-    def test_intra_subject_min_subject_count(self):
-        df = self._make_df([
+    def test_intra_subject_min_subject_count(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0", "subject": "sub1"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.8, "timepoint": "Day7", "subject": "sub1"},
         ])
@@ -213,8 +227,8 @@ class TestComputeTemporalMetrics:
         assert math.isnan(row["log2KineticDelta"])
 
     # R3: per-subject detail DataFrame returned in intra-subject mode
-    def test_per_subject_returned_in_intra_subject_mode(self):
-        df = self._make_df([
+    def test_per_subject_returned_in_intra_subject_mode(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.1, "timepoint": "Day0", "subject": "sub1"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.9, "timepoint": "Day7", "subject": "sub1"},
             {"sampleId": "s3", "elementId": "a", "frequency": 0.3, "timepoint": "Day0", "subject": "sub2"},
@@ -235,8 +249,8 @@ class TestComputeTemporalMetrics:
         assert subs == ["sub1", "sub2"]
 
     # Population mode: per_subject is None (not computed)
-    def test_per_subject_none_in_population_mode(self):
-        df = self._make_df([
+    def test_per_subject_none_in_population_mode(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0", "subject": "sub1"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.8, "timepoint": "Day7", "subject": "sub1"},
         ])
@@ -246,8 +260,8 @@ class TestComputeTemporalMetrics:
         assert per_subject is None
 
     # No subject → per_subject is None
-    def test_per_subject_none_when_no_subject(self):
-        df = self._make_df([
+    def test_per_subject_none_when_no_subject(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.2, "timepoint": "Day0"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.8, "timepoint": "Day7"},
         ])
@@ -257,8 +271,8 @@ class TestComputeTemporalMetrics:
         assert per_subject is None
 
     # Multiple elements: each computed independently
-    def test_multiple_elements(self):
-        df = self._make_df([
+    def test_multiple_elements(self, make_df):
+        df = make_df([
             {"sampleId": "s1", "elementId": "a", "frequency": 0.1, "timepoint": "Day0"},
             {"sampleId": "s1", "elementId": "b", "frequency": 0.9, "timepoint": "Day0"},
             {"sampleId": "s2", "elementId": "a", "frequency": 0.9, "timepoint": "Day7"},

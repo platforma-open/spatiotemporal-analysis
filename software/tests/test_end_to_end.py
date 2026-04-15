@@ -29,6 +29,7 @@ def _run_pipeline(
     tmp_path,
     csv_text,
     *,
+    mode="population",
     has_grouping=False,
     has_timepoint=False,
     has_subject=False,
@@ -39,7 +40,11 @@ def _run_pipeline(
     min_subject_count=2,
     top_n=20,
 ):
-    """Run the full analysis pipeline on CSV text, returning all result DataFrames."""
+    """Run the full analysis pipeline on CSV text, returning all result DataFrames.
+
+    ``mode`` may be ``"population"`` or ``"intra-subject"`` and is propagated to
+    all mode-aware computations (CLR, grouping, temporal).
+    """
     csv_file = tmp_path / "input.csv"
     csv_file.write_text(csv_text)
 
@@ -52,7 +57,7 @@ def _run_pipeline(
     df = average_replicates(df, has_subject, has_grouping, has_timepoint)
 
     if normalization == "clr":
-        df = compute_clr(df, "population", has_subject)
+        df = compute_clr(df, mode, has_subject)
     else:
         df = compute_relative_frequency(df)
 
@@ -64,14 +69,20 @@ def _run_pipeline(
         results["histogram"] = build_prevalence_histogram(prevalence)
 
     if has_grouping:
-        grouping, _ = compute_grouping_metrics(df, has_subject, "population", presence_threshold, min_subject_count)
+        grouping, per_subject_grouping = compute_grouping_metrics(
+            df, has_subject, mode, presence_threshold, min_subject_count
+        )
         results["grouping"] = grouping
+        results["grouping_per_subject"] = per_subject_grouping
         if len(grouping) > 0:
             results["heatmap"] = build_heatmap_data(df, grouping, top_n)
 
     if has_timepoint and len(timepoint_order) >= 2:
-        temporal, _ = compute_temporal_metrics(df, timepoint_order, has_subject, "population", min_subject_count)
+        temporal, per_subject_temporal = compute_temporal_metrics(
+            df, timepoint_order, has_subject, mode, min_subject_count
+        )
         results["temporal"] = temporal
+        results["temporal_per_subject"] = per_subject_temporal
         results["temporal_line"] = build_temporal_line_data(df, timepoint_order, top_n)
 
     return results
@@ -260,3 +271,79 @@ class TestEndToEndReplicates:
         # rep3 is unique (clone1, spleen) → 50
         assert len(grouping) == 1
         assert grouping["dominant"][0] == "lung"
+
+
+class TestEndToEndPipelineShape:
+    """Pipeline-shape tests — verify which outputs are produced for each
+    combination of enabled dimensions. Guards R5, R5a, R32 promises that
+    disabled dimensions skip their downstream outputs entirely."""
+
+    # R1, R3: intra-subject mode runs the per-subject code paths and exposes
+    # per-subject detail DataFrames (distinct from population-mode outputs)
+    def test_full_pipeline_intra_subject_mode(self, tmp_path):
+        csv_text = (
+            "sampleId,elementId,abundance,subject,grouping,timepoint\n"
+            "s1,clone1,100,sub1,lung,Day0\n"
+            "s2,clone1,200,sub1,spleen,Day7\n"
+            "s3,clone1,150,sub2,lung,Day0\n"
+            "s4,clone1,300,sub2,spleen,Day7\n"
+        )
+        results = _run_pipeline(
+            tmp_path, csv_text,
+            mode="intra-subject",
+            has_subject=True,
+            has_grouping=True,
+            has_timepoint=True,
+            timepoint_order=["Day0", "Day7"],
+            min_subject_count=1,
+        )
+        # In intra-subject mode, per-subject detail is populated (not None)
+        assert results["grouping_per_subject"] is not None
+        assert len(results["grouping_per_subject"]) > 0
+        assert results["temporal_per_subject"] is not None
+        assert len(results["temporal_per_subject"]) > 0
+        # Consensus columns are still present on the aggregated output
+        assert "consensusDominant" in results["grouping"].columns
+        assert "meanRi" in results["grouping"].columns
+
+    # R5a, R32: grouping-only pipeline produces no temporal outputs
+    def test_grouping_only_no_temporal(self, tmp_path):
+        csv_text = (
+            "sampleId,elementId,abundance,grouping\n"
+            "s1,clone1,100,lung\n"
+            "s2,clone1,50,spleen\n"
+        )
+        results = _run_pipeline(tmp_path, csv_text, has_grouping=True)
+        assert "grouping" in results
+        assert "heatmap" in results
+        assert "temporal" not in results
+        assert "temporal_line" not in results
+
+    # R5a, R32: temporal-only pipeline produces no grouping outputs
+    def test_temporal_only_no_grouping(self, tmp_path):
+        csv_text = (
+            "sampleId,elementId,abundance,timepoint\n"
+            "s1,clone1,100,Day0\n"
+            "s2,clone1,200,Day7\n"
+        )
+        results = _run_pipeline(
+            tmp_path, csv_text,
+            has_timepoint=True,
+            timepoint_order=["Day0", "Day7"],
+        )
+        assert "temporal" in results
+        assert "temporal_line" in results
+        assert "grouping" not in results
+        assert "heatmap" not in results
+
+    # R5: no subject → no prevalence/histogram outputs
+    def test_no_subject_skips_convergence(self, tmp_path):
+        csv_text = (
+            "sampleId,elementId,abundance,grouping\n"
+            "s1,clone1,100,lung\n"
+            "s2,clone1,50,spleen\n"
+        )
+        results = _run_pipeline(tmp_path, csv_text, has_grouping=True)
+        # has_subject defaulted to False → no prevalence computations
+        assert "prevalence" not in results
+        assert "histogram" not in results
