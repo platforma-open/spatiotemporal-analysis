@@ -24,7 +24,7 @@
     },
     "meta": {
       "title": "Clonotype Distribution",
-      "url": "https://github.com/platforma-open/spatiotemporal-analysis",
+      "url": "https://github.com/platforma-open/clonotype-distribution",
       "support": "mailto:support@milaboratories.com",
       "description": "Profiles clonal abundance across tissue compartments, timepoints, and subjects — computing restriction, temporal expansion, and cross-subject convergence metrics.",
       "longDescription": "file:../docs/description.md",
