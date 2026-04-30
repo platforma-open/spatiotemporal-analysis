@@ -28,6 +28,18 @@ def _js_str(v):
         return v
 
 
+def _normalize_categorical(df: pl.DataFrame, col: str) -> pl.DataFrame:
+    """Apply _js_str via a unique-value mapping. Metadata cardinality is small
+    (subject/grouping/timepoint typically <100 unique values) while the frame
+    has one row per clonotype × sample, so doing the Python work per-row with
+    map_elements would be orders of magnitude slower."""
+    if col not in df.columns:
+        return df
+    uniques = df[col].unique().drop_nulls().to_list()
+    mapping = {u: _js_str(u) for u in uniques}
+    return df.with_columns(pl.col(col).replace(mapping))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Spatiotemporal analysis")
     parser.add_argument("input_file", help="Input CSV file")
@@ -83,12 +95,11 @@ def read_input(path: str, has_grouping: bool, has_timepoint: bool, min_abundance
 
     # Normalize numeric-looking categorical values so they match the JS String()
     # representation the UI sends in --timepoint-order (e.g. CSV '5.0' -> '5').
-    if has_grouping and COL_GROUPING in df.columns:
-        df = df.with_columns(pl.col(COL_GROUPING).map_elements(_js_str, return_dtype=pl.String))
-    if has_timepoint and COL_TIMEPOINT in df.columns:
-        df = df.with_columns(pl.col(COL_TIMEPOINT).map_elements(_js_str, return_dtype=pl.String))
-    if COL_SUBJECT in df.columns:
-        df = df.with_columns(pl.col(COL_SUBJECT).map_elements(_js_str, return_dtype=pl.String))
+    if has_grouping:
+        df = _normalize_categorical(df, COL_GROUPING)
+    if has_timepoint:
+        df = _normalize_categorical(df, COL_TIMEPOINT)
+    df = _normalize_categorical(df, COL_SUBJECT)
 
     return df
 
